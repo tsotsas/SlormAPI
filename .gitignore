@@ -1,0 +1,8 @@
+bin/
+obj/
+*.user
+.vs/
+*.zip
+dist/
+installer/loader/
+__pycache__/
