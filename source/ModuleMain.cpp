@@ -2046,6 +2046,7 @@ static std::string FileVersion(const fs::path& P)
 	return s;
 }
 
+static std::string LegendaryWaitingNotice();       // "! 2 custom legendaries wait for their mod: ..." (below)
 static constexpr const char* kOff = ".disabled";   // "X.dll.disabled": switched off (Aurie loads only *.dll)
 static std::set<std::string> g_Toggled;            // files switched on / off this session (lower case)
 
@@ -2665,6 +2666,8 @@ namespace modspage
 		}
 		if (!Error.empty()) calls.Push(Text(984, 855, Clip(Error, 60), "ft_standard_13_b", "white"));
 		else if (pending) calls.Push(Text(984, 855, "Restart the game to apply the changes", "ft_standard_13_b", "white"));
+		else if (std::string waiting = LegendaryWaitingNotice(); !waiting.empty())
+			calls.Push(Text(984, 855, Clip(waiting, 70), "ft_standard_13_b", "white"));
 		else if (g_LastSession.GetBool("crashed", false))
 			calls.Push(Text(984, 855, g_LastSession.GetBool("during_startup", false)
 				? "The game crashed while starting last time - a mod may be the cause"
@@ -4006,6 +4009,7 @@ namespace legend
 			RValue fallback = Fallback(Item, line);
 			Json rec = Json::Object();
 			rec.Add("id", d->Id);
+			rec.Add("name", d->Name);                            // for the warning when its mod is missing
 			rec.Add("line", ToJson(*ArrayAt(Item, line), 2));
 			std::string fp = Fingerprint(fallback);
 			if (!Saved.count(fp) || sj::Dump(Saved[fp]) != sj::Dump(rec)) { Saved[fp] = rec; SavedDirty = true; }
@@ -4052,7 +4056,91 @@ namespace legend
 		return restored;
 	}
 
-	void PostLoad(CInstance*, int, RValue**, RValue&) { Restore(); }
+	// Epics in the loaded inventory that were custom legendaries whose mod is not loaded (or switched off) now:
+	// shown as a warning over the game for a while, and on the Mods page until they are back
+	struct Waiting { std::string Name, Id; };
+	std::vector<Waiting> WaitingList;
+	double CheckAt = 0, WarnLeft = 0, WarnTick = 0;
+
+	void CheckWaiting()
+	{
+		LoadSaved();
+		WaitingList.clear();
+		if (Saved.empty()) return;
+		EachSlot([&](size_t, size_t, RValue& Item)
+		{
+			RValue* h = ArrayAt(Item, 0);
+			RValue* rarity = h ? ArrayAt(*h, 0) : nullptr;
+			if (!rarity || KindOf(*rarity) != VALUE_STRING || rarity->ToString() != "epic") return;
+			auto it = Saved.find(Fingerprint(Item));
+			if (it == Saved.end()) return;
+			Def* d = ById(it->second.GetStr("id"));
+			if (d && d->Active && d->Ref >= 0) return;            // (restored on its next check)
+			WaitingList.push_back({ it->second.GetStr("name", it->second.GetStr("id")), it->second.GetStr("id") });
+		});
+	}
+
+	std::string WaitingNames(size_t Max = 3)
+	{
+		std::string names;
+		for (size_t i = 0; i < WaitingList.size() && i < Max; ++i) names += (i ? ", " : "") + WaitingList[i].Name;
+		if (WaitingList.size() > Max) names += ", ...";
+		return names;
+	}
+
+	// the mods they belong to: "lua:my_mod:item" -> "my_mod (Lua)", "MyMod:item" -> "MyMod"
+	std::string WaitingMods()
+	{
+		std::set<std::string> mods;
+		for (auto& w : WaitingList)
+		{
+			std::string owner = w.Id.substr(0, w.Id.rfind(':'));
+			mods.insert(owner.starts_with("lua:") ? owner.substr(4) + " (Lua)" : owner);
+		}
+		std::string out;
+		for (auto& m : mods) out += (out.empty() ? "" : ", ") + m;
+		return out;
+	}
+
+	void PostLoad(CInstance*, int, RValue**, RValue&)
+	{
+		Restore();
+		CheckAt = MicrosSinceStart() / 1e6 + 4;                    // Lua mods that start late get time to register first
+	}
+
+	// over the game's GUI while no menu is open, for WarnLeft seconds of being shown
+	void DrawWarning(CInstance* Self)
+	{
+		if (WarnLeft <= 0 || WaitingList.empty() || !Self) return;
+		RValue menu = g_Yytk->CallBuiltin("variable_instance_get", { RValue(Self), RValue("menu_show") });
+		if (KindOf(menu) == VALUE_STRING && menu.ToString() != "none") return;
+		double now = MicrosSinceStart() / 1e6;
+		if (WarnTick > 0) WarnLeft -= (std::min)(0.25, now - WarnTick);
+		WarnTick = now;
+		auto text = [&](double X, double Y, const std::string& S, const char* Font, const char* Color)
+		{
+			std::vector<RValue> a = { RValue(X), RValue(Y), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(1.0), RValue(1.0),
+				RValue(0.0), RValue(1.0), RStr(Color), RStr("black"), RValue(1.0), RValue(false) };
+			RValue r;
+			g_Yytk->CallGameScriptEx(r, "gml_Script_scr_draw_text", Self, Self, a);
+		};
+		double alpha = (std::min)(1.0, WarnLeft);                  // fades out in its last second
+		RValue oldAlpha = g_Yytk->CallBuiltin("draw_get_alpha", {}), oldColor = g_Yytk->CallBuiltin("draw_get_color", {});
+		g_Yytk->CallBuiltin("draw_set_alpha", { RValue(0.88 * alpha) });
+		g_Yytk->CallBuiltin("draw_set_color", { RValue(static_cast<double>(0x0a0a0a)) });
+		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380.0), RValue(130.0), RValue(1540.0), RValue(262.0), RValue(false) });
+		g_Yytk->CallBuiltin("draw_set_color", { RValue(static_cast<double>(0x2a5ad0)) });       // the game's orange (BGR)
+		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380.0), RValue(130.0), RValue(1540.0), RValue(262.0), RValue(true) });
+		g_Yytk->CallBuiltin("draw_set_alpha", { RValue(alpha) });
+		size_t n = WaitingList.size();
+		text(960, 160, std::to_string(n) + (n == 1 ? " custom legendary is" : " custom legendaries are") + " waiting for a mod that is not loaded",
+			"ft_standard_16", "white");
+		text(960, 196, WaitingNames() + "   -   mod: " + WaitingMods(), "ft_standard_13_b", "item_highlight");
+		text(960, 230, std::string(n == 1 ? "It stays an Epic" : "They stay Epics") + " until the mod is back. Don't reforge, upgrade or sell "
+			+ (n == 1 ? "it" : "them") + ", or it can't become legendary again.", "ft_standard_13_b", "grey");
+		g_Yytk->CallBuiltin("draw_set_alpha", { oldAlpha });
+		g_Yytk->CallBuiltin("draw_set_color", { oldColor });
+	}
 
 	// last line of defence: a custom legendary number never reaches a save file (another container than the
 	// inventory, e.g. the shop): the save gets the game's own legendary its row was copied from
@@ -4264,10 +4352,30 @@ namespace legend
 			g_Yytk->CallBuiltin("variable_instance_set", { target, RValue("self_refresh_stats"), RValue(true) });
 	}
 
+	void EnsureHooks();
+	bool Started = false;
+
 	void Tick()
 	{
-		if (Defs.empty()) return;
 		double now = MicrosSinceStart() / 1e6;
+		if (!Started)                                               // custom legendaries were saved before: their saves
+		{                                                           // are watched even when no mod registers one now
+			Started = true;
+			LoadSaved();
+			if (!Saved.empty()) EnsureHooks();
+		}
+		if (CheckAt > 0 && now >= CheckAt)
+		{
+			CheckAt = 0;
+			CheckWaiting();
+			if (!WaitingList.empty())
+			{
+				WarnLeft = 15;
+				DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] %zu custom legendar%s wait for their mod (%s): %s",
+					WaitingList.size(), WaitingList.size() == 1 ? "y" : "ies", WaitingMods().c_str(), WaitingNames(10).c_str());
+			}
+		}
+		if (Defs.empty()) return;
 		if (now >= PassiveAt) { PassiveAt = now + 0.25; Passives(); }
 		bool every = false;
 		for (auto& d : Defs) for (auto& e : d.Effects) every |= e.Trigger == "every";
@@ -4357,6 +4465,7 @@ namespace legend
 		SyncSubs();
 		RefreshHero();
 		Restore();
+		if (!WaitingList.empty()) CheckWaiting();                // the warning goes when its legendaries are back
 		Applied.erase(cur.Id);                                   // its stats may have changed: the buff is made again
 		Json out = Json::Object();
 		out.Add("id", cur.Id);
@@ -4475,6 +4584,27 @@ static Json CmdLegendaryEquipped(const Json& Req)
 	return it != legend::Equipped.end() && d.Active ? Json(it->second) : Json();
 }
 static Json CmdLegendaryDrop(const Json& Req) { return legend::Drop(Req); }
+static std::string LegendaryWaitingNotice()
+{
+	size_t n = legend::WaitingList.size();
+	if (!n) return "";
+	return "! " + std::to_string(n) + (n == 1 ? " custom legendary waits" : " custom legendaries wait") + " for its mod: "
+		+ legend::WaitingMods();
+}
+
+static Json CmdLegendariesWaiting()
+{
+	legend::CheckWaiting();
+	Json out = Json::Array();
+	for (auto& w : legend::WaitingList)
+	{
+		Json j = Json::Object();
+		j.Add("name", w.Name);
+		j.Add("id", w.Id);
+		out.Push(std::move(j));
+	}
+	return out;
+}
 
 
 static Json Dispatch(const Json& Req);
@@ -4537,6 +4667,7 @@ static Json Dispatch(const Json& Req)
 	if (cmd == "legendaries") return CmdLegendaries();
 	if (cmd == "legendary_equipped") return CmdLegendaryEquipped(Req);
 	if (cmd == "legendary_drop") return CmdLegendaryDrop(Req);
+	if (cmd == "legendaries_waiting") return CmdLegendariesWaiting();
 	if (cmd == "buff_add") return CmdBuffAdd(Req);
 	if (cmd == "buff_remove") return CmdBuffRemove(Req);
 	if (cmd == "buff_stacks") return CmdBuffStacks(Req);
@@ -5274,6 +5405,7 @@ struct PerfScope
 
 // obj_ui_next_gen's Step code, once seen (compared by pointer from then on; forgotten if it stops showing up)
 static CCode* g_UiStepCode = nullptr;
+static CCode* g_UiDrawCode = nullptr;                // the GUI draw of obj_ui_next_gen (the legendary warning)
 static uint64_t g_EventsSinceUiStep = 0;
 
 static void CodeEventCallback(FWCodeEvent& Context)
@@ -5307,12 +5439,18 @@ static void CodeEventCallback(FWCodeEvent& Context)
 		try { PerfScope p(&g_PerfPartUs[2]); lua::Tick(); }
 		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] lua: %s", e.what()); }
 	}
-	if (!g_Overlay || g_InOverlay) return;
 	auto& args = Context.Arguments();
 	CCode* code = std::get<2>(args);
-	if (!code || !code->GetName() || g_OverlayEvent != code->GetName()) return;
-	Context.Call();                                   // the game's own drawing first, the overlay on top
-	DrawOverlay(std::get<0>(args), std::get<1>(args));
+	bool uiDraw = code && (code == g_UiDrawCode || (!g_UiDrawCode && code->GetName() && !strcmp(code->GetName(), "gml_Object_obj_ui_next_gen_Draw_64")));
+	if (uiDraw) g_UiDrawCode = code;
+	bool overlay = g_Overlay && !g_InOverlay && code && code->GetName() && g_OverlayEvent == code->GetName();
+	bool warn = uiDraw && legend::WarnLeft > 0;
+	if (!overlay && !warn) return;
+	Context.Call();                                   // the game's own drawing first, ours on top
+	if (overlay) DrawOverlay(std::get<0>(args), std::get<1>(args));
+	if (warn)
+		try { legend::DrawWarning(std::get<0>(args)); }
+		catch (const std::exception&) { legend::WarnLeft = 0; }
 }
 
 // ---- the interface other modules call (same commands as the TCP protocol, on the calling - game - thread)

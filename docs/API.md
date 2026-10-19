@@ -15,7 +15,7 @@ widgets, Lua mods, settings, data files, and the game facts you need to use them
   - [Settings](#settings): `register_settings` `settings` `set_setting`
   - [Data files](#data-files): `mod_data` `mod_log`
   - [Game knowledge](#game-knowledge): `item_info` `stat_info` `stat_list` `hero_stats` `slot_info` `legendary_info` `skill_info`
-  - [Legendaries](#legendaries): `register_legendary` `unregister_legendary` `legendaries` `legendary_equipped` `legendary_drop`
+  - [Legendaries](#legendaries): `register_legendary` `unregister_legendary` `legendaries` `legendary_equipped` `legendary_drop` `legendaries_waiting`
   - [Buffs](#buffs): `buff_add` `buff_remove` `buff_stacks`
   - [Other](#other): `batch` `perf` `runner` `routines` `routine_index`
 - [Events](#events)
@@ -525,6 +525,10 @@ gives stats or runs effects; its name shows "(mod off)". A Lua mod that is switc
 `id`, `roll` [100] → a drop of that legendary at the hero (an equipment drop of its slot, made that legendary): for
 testing, or as a reward. → the `obj_loot` stub.
 
+#### `legendaries_waiting`
+→ `[{name, id}]`: items in the inventory that were custom legendaries when they were saved and whose mod is not
+loaded (or switched off) now - they are Epics until it is back.
+
 ### Buffs
 
 The game's own buffs: stats while they last, stacks, timers, and (with an icon) a place in the buff bar.
@@ -691,6 +695,9 @@ slorm.legendary{
 the same stats, and SlormAPI notes which Epic it was (`mods/aurie/SlormAPI/data/legendary_items.json`); after loading,
 or when the legendary registers, the Epic becomes the legendary again. So:
 - removing the mod (or SlormAPI) leaves an ordinary Epic, never a broken item;
+- with SlormAPI installed but the mod missing, the player is warned after loading (over the game for 15 seconds,
+  and on the Mods page): which legendaries wait for which mod, and not to reforge, upgrade or sell those Epics -
+  a changed Epic can no longer be recognized;
 - keep the `id` the same: the Epic finds its legendary by it;
 - a save copied to another PC (or Steam Cloud) has the Epic there; it becomes the legendary on a PC that has the
   mod and its `legendary_items.json`.
