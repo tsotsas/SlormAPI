@@ -45,6 +45,9 @@ Manually or with Vortex (`SlormAPI-1.0.0.zip`, the game-folder layout: `mods/Aur
 Uninstall: delete `SlormAPI.dll` (or installer > 4). SlormAPI never writes your save files.
 
 ## For mod authors
+**Full reference: [docs/API.md](docs/API.md)** — every command, event, draw program, widget and Lua function in
+detail, the item format, a game cheat sheet, and how to start a C++ or Lua mod. The short version:
+
 Copy `source/SlormAPI_Interface.hpp` into your Aurie module and get the interface (modules can load in any order, so ask
 for it from a game callback, not in `ModuleInitialize`):
 
