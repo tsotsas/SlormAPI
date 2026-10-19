@@ -22,6 +22,7 @@
 #include "Server.hpp"
 #include "SlormAPI_Interface.hpp"
 #include "GameData.hpp"
+#include "StatCatalog.hpp"
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -1798,9 +1799,63 @@ static Json CmdStatInfo(const Json& Req)
 	for (auto& [slot, pool] : d.GoldPool)
 		if (std::find(pool.begin(), pool.end(), stat) != pool.end()) slots.Push(Json(slot));
 	out.Add("epic_slots", std::move(slots));   // slots where it can roll as a gold (epic) line
+	for (auto& c : gd::kStatCatalog)
+		if (stat == c.Key) { out.Add("unit", c.Unit); out.Add("item_affix", c.Affix); }
 	if (const Json* slot = Req.Find("slot"); slot && slot->type == Json::Str) out.Add("label", d.StatLabel(stat, slot->s));
 	if (const Json* roll = Req.Find("roll"))                                       // the value of a roll on an item level
 		out.Add("value", d.AffixValue(stat, gd::Num(*roll), static_cast<int>(Req.GetNum("level", 100))));
+	return out;
+}
+
+// every stat input of the game: key, name, unit (flat, percent, multiplier_percent, seconds), item affix or not
+static Json CmdStatList()
+{
+	auto& d = Data();
+	Json out = Json::Array();
+	for (auto& c : gd::kStatCatalog)
+	{
+		Json j = Json::Object();
+		j.Add("stat", c.Key);
+		j.Add("name", d.StatName(c.Key));
+		j.Add("unit", c.Unit);
+		j.Add("item_affix", c.Affix);
+		out.Push(std::move(j));
+	}
+	return out;
+}
+
+// the hero's final stats (what the game computed from items, skills, buffs...): the hero's final_* variables
+static Json CmdHeroStats()
+{
+	RValue obj = AssetIndex("obj_parent_hero");
+	if (g_Yytk->CallBuiltin("instance_number", { obj }).ToDouble() < 1) Fail("no hero");
+	RValue hero = g_Yytk->CallBuiltin("instance_find", { obj, RValue(0.0) });
+	auto num = [&](const char* Var) -> Json
+	{
+		RValue v = g_Yytk->CallBuiltin("variable_instance_get", { hero, RValue(Var) });
+		return IsNumeric(v) ? Json(v.ToDouble()) : Json();
+	};
+	Json stats = Json::Object();
+	RValue names = g_Yytk->CallBuiltin("variable_instance_get_names", { hero });
+	for (size_t k = 0, n = ArrayLen(names); k < n; ++k)
+	{
+		RValue* name = ArrayAt(names, k);
+		if (!name || KindOf(*name) != VALUE_STRING) continue;
+		std::string s = name->ToString();
+		if (!s.starts_with("final_")) continue;
+		RValue v = g_Yytk->CallBuiltin("variable_instance_get", { hero, *name });
+		if (IsNumeric(v)) stats.Add(s.substr(6), v.ToDouble());
+	}
+	Json out = Json::Object();
+	out.Add("hero", CurrentHero());
+	out.Add("instance", ToJson(hero, 0));
+	out.Add("life", num("the_health"));
+	out.Add("max_life", num("final_the_max_health"));
+	out.Add("mana", num("the_mana"));
+	out.Add("max_mana", num("final_the_max_mana"));
+	out.Add("shield", num("the_shield"));
+	out.Add("max_shield", num("the_max_shield"));
+	out.Add("stats", std::move(stats));
 	return out;
 }
 
@@ -1932,6 +1987,18 @@ static bool Locked(const std::string& File) { auto f = Lower(File); return f == 
 // loader parts that sit in mods/aurie: YYToolkit, and Slorm Loader's module when the game uses that loader
 static bool LoaderFile(const std::string& File) { auto f = Lower(File); return f == "yytoolkit.dll" || f == "slormloader.dll"; }
 
+// A file a mod manager deployed as a hardlink (Vortex: more than one name for the same data). Renaming it to switch it
+// off would break the manager's deployment: it is switched in the manager instead.
+static bool HardLinked(const fs::path& P)
+{
+	HANDLE h = CreateFileW(P.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (h == INVALID_HANDLE_VALUE) return false;
+	BY_HANDLE_FILE_INFORMATION fi{};
+	bool linked = GetFileInformationByHandle(h, &fi) && fi.nNumberOfLinks > 1;
+	CloseHandle(h);
+	return linked;
+}
+
 // SlormAPI, the mods of mods/aurie by name (registered ones with what they told about themselves; switched-off ones
 // too), then the loader (YYToolkit, mods/native). A switch applies at the next launch: "pending" until then.
 static Json CmdMods()
@@ -1995,7 +2062,9 @@ static Json CmdMods()
 		j.Add("kind", r.Loader ? "loader" : "mod");
 		j.Add("loaded", r.Loaded);
 		j.Add("enabled", r.Enabled);
-		j.Add("locked", r.Loader || Locked(r.M.File) || !(Exists(aurie / r.M.File) || Exists(aurie / (r.M.File + kOff))));
+		bool managed = !r.Loader && HardLinked(aurie / r.M.File);
+		j.Add("locked", managed || r.Loader || Locked(r.M.File) || !(Exists(aurie / r.M.File) || Exists(aurie / (r.M.File + kOff))));
+		if (managed) j.Add("managed", true);
 		j.Add("pending", g_Toggled.count(Lower(r.M.File)) > 0 && r.Enabled != r.Loaded);
 		if (!r.M.Game.empty()) j.Add("game", r.M.Game);
 		out.Push(std::move(j));
@@ -2007,6 +2076,8 @@ static Json CmdMods()
 		out.a[i].Add("problems", ModProblems(rows[i].M, out));
 		if (!rows[i].M.Game.empty() && !game.empty() && CompareVersions(rows[i].M.Game, game) != 0)
 			out.a[i].Add("note", "Made for game " + rows[i].M.Game);
+		else if (out.a[i].GetBool("managed", false))
+			out.a[i].Add("note", "Switched on / off in Vortex");
 	}
 	LuaModRows(out);
 	return out;
@@ -2150,6 +2221,7 @@ static Json CmdModEnable(const Json& Req)
 	if (file.find_first_of("/\\:") != std::string::npos || !Lower(file).ends_with(".dll")) Fail("bad mod file '" + file + "'");
 	if (Locked(file)) Fail(file + " stays on: other mods need it");
 	fs::path dll = AurieDir() / file, off = AurieDir() / (file + kOff);
+	if (HardLinked(dll)) Fail(file + " is managed by Vortex: switch it on / off there");
 	std::error_code ec;
 	if (on && !Exists(dll) && Exists(off)) fs::rename(off, dll, ec);
 	else if (!on && Exists(dll)) fs::rename(dll, off, ec);
@@ -2842,16 +2914,22 @@ namespace events
 	{
 		static const std::vector<ScriptEvent> list = {
 			{ "enemy_killed", "scr_hero_stats_on_kill", 0, { "enemy_level" } },   // self = the enemy, arg 0 = loot profile
-			{ "hero_hit", "scr_hero_proc_when_hit", 0, { "the_health", "final_the_max_health" } },   // damage, attacker
+			{ "hero_hit", "scr_hero_proc_when_hit", 0, { "the_health", "final_the_max_health", "the_shield", "the_max_shield" } },   // damage, attacker
 			{ "hero_died", "scr_hero_dead", 0, {} },
 			{ "item_picked_up", "scr_pick_up_item", 3, {} },                     // arg 0 = the items, result = picked
 			{ "skill_cast", "scr_hero_proc_when_any_cast", 0, {} },              // once per cast, arg 0 = the skill
 			{ "run_started", "scr_run_start", 0, {} },
 			{ "run_ended", "scr_run_end", 0, {} },
+			{ "hit_dealt", "scr_hero_proc_when_crit_brutal", 0, {} },          // once per hero hit: skill, strike type, target
+			{ "damage_dealt", "scr_damage_shield", 0, {} },                     // arg 0 = target, result = health damage
+			{ "status_applied", "scr_buff_list_add", 0, {} },                   // key, duration, target
+			{ "cooldown_started", "scr_new_attack_state_start_cooldown", 0, {} },   // self = hero, arg 0 = skill
+			{ "stats_refreshed", "scr_stats_refresh", 0, {} },                  // self = the instance refreshed
 		};
 		return list;
 	}
-	const char* const kWatched[] = { "loot_dropped", "gold_changed", "level_up", "item_equipped", "room_changed", "menu_changed" };
+	const char* const kWatched[] = { "loot_dropped", "gold_changed", "level_up", "item_equipped", "room_changed", "menu_changed",
+		"status_removed" };
 	const char* const kDirect[] = { "setting_changed", "boss_killed", "ui_clicked" };   // from commands (g_DirectEvents) or other events
 
 	struct Sub { uint64_t Id; std::string Event; SlormEventCallback Fn; void* User; };
@@ -2887,7 +2965,8 @@ namespace events
 	// a script event's hook also serves the events made from it
 	bool WantedScript(const ScriptEvent& Se)
 	{
-		return Wanted(Se.Event) || (!strcmp(Se.Event, "enemy_killed") && Wanted("boss_killed"));
+		return Wanted(Se.Event) || (!strcmp(Se.Event, "enemy_killed") && Wanted("boss_killed"))
+			|| (!strcmp(Se.Event, "status_applied") && Wanted("status_removed"));   // removals are watched from applications
 	}
 
 	// one layer per wanted script event, none for the others
@@ -2932,6 +3011,29 @@ namespace events
 	int EquipHero = -1;
 	std::vector<std::pair<void*, size_t>> EquipSig;   // per slot: the item array (identity) and its length
 	std::vector<Json> EquipItems;
+
+	// statuses on enemies seen applied, checked a few times a second until their stacks are gone ("status_removed")
+	struct Tracked { int64_t Inst; std::string Key; Json Target; };
+	std::map<std::pair<int64_t, std::string>, Tracked> Statuses;
+	double StatusAt = 0;
+
+	int64_t HeroId()
+	{
+		RValue obj = AssetIndex("obj_parent_hero");
+		if (g_Yytk->CallBuiltin("instance_number", { obj }).ToDouble() < 1) return -1;
+		return g_Yytk->CallBuiltin("instance_find", { obj, RValue(0.0) }).ToInt64();
+	}
+
+	// the stacks of a status on an instance (-1: the instance is gone)
+	double StatusStacks(int64_t Inst, const std::string& Key)
+	{
+		CInstance* inst = nullptr;
+		if (!AurieSuccess(g_Yytk->GetInstanceObject(static_cast<int32_t>(Inst), inst)) || !inst) return -1;
+		RValue r;
+		std::vector<RValue> args = { RValue(std::string_view(Key)), RValue(inst) };
+		if (!AurieSuccess(g_Yytk->CallGameScriptEx(r, "gml_Script_scr_buff_list_get_stack", inst, inst, args))) return 0;
+		return IsNumeric(r) ? r.ToDouble() : 0;
+	}
 
 	RValue Global(const char* Name)
 	{
@@ -3070,6 +3172,24 @@ namespace events
 			Menu = menu;
 			Seen.insert("menu");
 		}
+		if (Wanted("status_removed") && MicrosSinceStart() / 1e6 >= StatusAt)
+		{
+			StatusAt = MicrosSinceStart() / 1e6 + 0.25;
+			for (auto it = Statuses.begin(); it != Statuses.end();)
+			{
+				double stacks = StatusStacks(it->second.Inst, it->second.Key);
+				if (stacks > 0) { ++it; continue; }
+				Json d = Json::Object();
+				d.Add("status", it->second.Key);
+				try { d.Add("name", Data().BuffName(it->second.Key)); }
+				catch (const std::exception&) {}
+				d.Add("target", it->second.Target);
+				d.Add("reason", stacks < 0 ? "target_gone" : "ended");
+				Emit(Out, "status_removed", std::move(d));
+				it = Statuses.erase(it);
+			}
+		}
+		else if (!Wanted("status_removed")) Statuses.clear();
 		Primed = true;
 	}
 
@@ -3087,7 +3207,9 @@ namespace events
 	void Convert(std::vector<std::pair<std::string, Json>>& Out)
 	{
 		auto it = g_HookLogs.find(kOwner);
-		if (it == g_HookLogs.end()) return;
+		if (it == g_HookLogs.end() || it->second.empty()) return;
+		const int64_t heroId = HeroId();
+		bool statsSent = false;
 		for (auto& e : it->second)
 		{
 			const Json* vars = e.Self.Find("vars");
@@ -3118,6 +3240,8 @@ namespace events
 				d.Add("attacker", stub(arg(1)));
 				d.Add("life", var("the_health"));
 				d.Add("max_life", var("final_the_max_health"));
+				d.Add("shield", var("the_shield"));                 // Light Shield after the hit
+				d.Add("max_shield", var("the_max_shield"));
 				Emit(Out, "hero_hit", std::move(d));
 			}
 			else if (script == "scr_hero_dead") DeadThisFrame = true;   // runs every step while dead: one event per death
@@ -3137,6 +3261,59 @@ namespace events
 				d.Add("items", arg(0));
 				d.Add("picked", e.Result);
 				Emit(Out, "item_picked_up", std::move(d));
+			}
+			else if (script == "scr_hero_proc_when_crit_brutal")   // skill, ?, ?, "normal" | "critical" | "brutal", ?, target
+			{
+				std::string strike = gd::Str(arg(3));
+				d.Add("target", stub(arg(5)));
+				d.Add("skill", arg(0));
+				d.Add("strike", strike == "brutal" ? "ancestral" : strike);
+				Emit(Out, "hit_dealt", std::move(d));
+			}
+			else if (script == "scr_damage_shield")                // target, ... -> the damage left after shields
+			{
+				const Json* t = arg(0).Find("$inst");
+				double dmg = gd::Num(e.Result);
+				if (!t || static_cast<int64_t>(t->n) == heroId || dmg <= 0) continue;   // the hero's own damage is hero_hit
+				d.Add("target", stub(arg(0)));
+				d.Add("damage", dmg);
+				Emit(Out, "damage_dealt", std::move(d));
+			}
+			else if (script == "scr_buff_list_add")                // key, duration, target
+			{
+				const Json* t = arg(2).Find("$inst");
+				const Json* s = e.Self.Find("$inst");
+				if (!t || static_cast<int64_t>(t->n) == heroId || (s && s->n == t->n)) continue;   // statuses on others only
+				std::string key = gd::Str(arg(0));
+				int64_t inst = static_cast<int64_t>(t->n);
+				double stacks = StatusStacks(inst, key);
+				d.Add("status", key);
+				try { d.Add("name", Data().BuffName(key)); }
+				catch (const std::exception&) {}
+				d.Add("target", stub(arg(2)));
+				d.Add("duration", arg(1));
+				d.Add("stacks", stacks > 0 ? stacks : 0.0);
+				if (Wanted("status_removed") && stacks > 0 && Statuses.size() < 4096)
+					Statuses[{ inst, key }] = Tracked{ inst, key, stub(arg(2)) };
+				Emit(Out, "status_applied", std::move(d));
+			}
+			else if (script == "scr_new_attack_state_start_cooldown")
+			{
+				int h = CurrentHero(), id = static_cast<int>(gd::Num(arg(0), -1));
+				d.Add("skill", id);
+				d.Add("hero", h);
+				try { d.Add("name", Data().SkillName(h, id)); }
+				catch (const std::exception&) {}
+				d.Add("cooldown", e.Result);
+				Emit(Out, "cooldown_started", std::move(d));
+			}
+			else if (script == "scr_stats_refresh")
+			{
+				const Json* s = e.Self.Find("$inst");
+				if (!s || static_cast<int64_t>(s->n) != heroId || statsSent) continue;   // the hero's, once per frame
+				statsSent = true;
+				d.Add("hero", CurrentHero());
+				Emit(Out, "stats_refreshed", std::move(d));
 			}
 		}
 		it->second.clear();
@@ -3416,6 +3593,8 @@ static Json Dispatch(const Json& Req)
 	if (cmd == "legendary_info") return CmdLegendaryInfo(Req);
 	if (cmd == "skill_info") return CmdSkillInfo(Req);
 	if (cmd == "slot_info") return CmdSlotInfo(Req);
+	if (cmd == "stat_list") return CmdStatList();
+	if (cmd == "hero_stats") return CmdHeroStats();
 	if (cmd == "mod_data") return CmdModData(Req);
 	if (cmd == "mod_log") return CmdModLog(Req);
 	if (cmd == "batch")
@@ -3857,6 +4036,8 @@ function S.slot_info(slot, hero) return S.request{ cmd = "slot_info", slot = slo
 function S.stat_info(stat, slot, roll, level)
   return S.request{ cmd = "stat_info", stat = stat, slot = slot, roll = roll, level = level }
 end
+function S.hero_stats() return S.request{ cmd = "hero_stats" } end
+function S.stat_list() return S.request{ cmd = "stat_list" } end
 function S.load_data() return S.request{ cmd = "mod_data" } end
 function S.save_data(value) return S.request{ cmd = "mod_data", value = value } end
 function S.log_file(...)
@@ -4059,7 +4240,9 @@ static void LuaModRows(Json& Out)
 		j.Add("kind", "lua");
 		j.Add("loaded", m.L != nullptr);
 		j.Add("enabled", m.Enabled);
-		j.Add("locked", false);
+		bool managed = HardLinked(m.Path);                       // deployed by Vortex: switched there
+		j.Add("locked", managed);
+		if (managed) { j.Add("managed", true); j.Add("note", "Switched on / off in Vortex"); }
 		j.Add("pending", false);
 		Json problems = Json::Array();
 		if (!m.Error.empty()) problems.Push(Json("Lua error: " + m.Error));
@@ -4073,6 +4256,7 @@ static bool LuaToggle(const std::string& File, bool On)
 {
 	if (!Lower(File).ends_with(".lua") || File.find_first_of("/\\:") != std::string::npos) return false;
 	fs::path dir = GameDir() / "mods" / "lua", on = dir / File, off = dir / (File + kOff);
+	if (HardLinked(on)) Fail(File + " is managed by Vortex: switch it on / off there");
 	std::error_code ec;
 	if (On && !Exists(on) && Exists(off)) fs::rename(off, on, ec);
 	else if (!On && Exists(on)) fs::rename(on, off, ec);

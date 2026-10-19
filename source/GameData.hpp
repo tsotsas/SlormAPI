@@ -102,6 +102,7 @@ namespace gd
 		struct Leg { int Id; std::string Name, Item; int Hero; bool Lootable; std::string Desc, Value, Type; };
 		std::map<int, Leg> Legendaries;
 		std::map<int, std::map<int, std::string>> Skills;           // class -> skill id -> name
+		std::map<std::string, std::pair<std::string, std::string>> Buffs;   // dat_buf.json key -> name, description
 		bool Loaded = false;
 
 		void Load()
@@ -145,7 +146,21 @@ namespace gd
 				}
 				catch (...) {}
 			}
+			try                                                      // buffs and statuses: fire_burn -> "Burn"
+			{
+				Json buf = ReadGameJson("dat_buf.json");
+				for (auto& r : buf.a)
+					if (const Json* ref = r.Find("REF"); ref && ref->type == Json::Str)
+						Buffs[ref->s] = { r.GetStr("EN_NAME"), r.GetStr("EN_DESCRIPTION") };
+			}
+			catch (...) {}
 			Loaded = true;
+		}
+
+		std::string BuffName(const std::string& Key) const
+		{
+			auto it = Buffs.find(Key);
+			return it != Buffs.end() && !it->second.first.empty() ? it->second.first : Key;
 		}
 
 		std::string StatName(const std::string& Ref) const

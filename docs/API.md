@@ -14,7 +14,7 @@ widgets, Lua mods, settings, data files, and the game facts you need to use them
   - [Mods](#mods): `register_mod` `mods` `mods_page` `mod_enable`
   - [Settings](#settings): `register_settings` `settings` `set_setting`
   - [Data files](#data-files): `mod_data` `mod_log`
-  - [Game knowledge](#game-knowledge): `item_info` `stat_info` `slot_info` `legendary_info` `skill_info`
+  - [Game knowledge](#game-knowledge): `item_info` `stat_info` `stat_list` `hero_stats` `slot_info` `legendary_info` `skill_info`
   - [Other](#other): `batch` `perf` `runner` `routines` `routine_index`
 - [Events](#events)
 - [Draw programs](#draw-programs)
@@ -464,6 +464,17 @@ and the lootable legendaries for that slot and hero, both sorted by name.
 `id` *n* → `{id, name, slot, hero, lootable, description, values, types}`. `hero`: -1 any, 0-2 a hero, 99 legacy,
 999 reaper. `description` is the game's text: `@` = a value (from `values`), `#` = a line break.
 
+#### `stat_list`
+→ every stat input of the game (176): `[{stat, name, unit, item_affix}]`. `unit`: `flat`, `percent`,
+`multiplier_percent` (the `*_global_mult` multipliers) or `seconds`; `item_affix`: one of the 92 stats items can roll.
+`stat_info` returns the same `unit` / `item_affix` for one stat.
+
+#### `hero_stats`
+→ the hero's current final stats, as the game computed them from items, skills, buffs and everything else:
+`{hero, instance, life, max_life, mana, max_mana, shield, max_shield, stats: {crit_chance: 51.3, cooldown_reduction:
+45.6, attack_speed: ..., the_max_health: ..., ...}}` (`stats` = the hero's `final_*` variables, without the prefix;
+81 in 1.0.2c). Fails when there is no hero (e.g. in the main menu).
+
 #### `skill_info`
 `hero` *n* [current], `id` *n* → `{hero, id, name}`.
 
@@ -493,7 +504,13 @@ someone listens; watchers compare state each frame (or a few times a second).
 |---|---|---|
 | `enemy_killed` | `enemy` {$inst, $object}, `x`, `y`, `level`, `profile` (`trash` / `good` / `elite` / `boss`) | `scr_hero_stats_on_kill` |
 | `boss_killed` | as `enemy_killed` | a kill with profile `boss` |
-| `hero_hit` | `damage`, `attacker` {$inst, $object}, `life`, `max_life` | `scr_hero_proc_when_hit` |
+| `hero_hit` | `damage`, `attacker` {$inst, $object}, `life`, `max_life`, `shield`, `max_shield` (Light Shield after the hit) | `scr_hero_proc_when_hit` |
+| `hit_dealt` | `target` {$inst, $object}, `skill` (id, or a name such as `"overdrive"`), `strike` (`normal` / `critical` / `ancestral`) | every hero hit (`scr_hero_proc_when_crit_brutal`) |
+| `damage_dealt` | `target`, `damage` (the health it lost, after its shields) | `scr_damage_shield` (hits, procs and other damage to enemies) |
+| `status_applied` | `status` (the game's key, e.g. `fire_burn`, `ice_chill`, `knight_bleed`, `reaper_enfeeble`), `name` ("Burn"), `target`, `duration` (-1 = until removed), `stacks` (after it) | `scr_buff_list_add` on an enemy |
+| `status_removed` | `status`, `name`, `target`, `reason` (`ended`, or `target_gone` when the enemy died / despawned) | a status seen applied whose stacks are gone (checked 4×/s) |
+| `cooldown_started` | `skill`, `name`, `hero`, `cooldown` (the game's cooldown value) | `scr_new_attack_state_start_cooldown` |
+| `stats_refreshed` | `hero` (at most once per frame; often several times a second in combat) | the hero's `scr_stats_refresh` |
 | `hero_died` | — (once per death) | `scr_hero_dead` |
 | `item_picked_up` | `items` (what was picked up), `picked` (the script's result) | `scr_pick_up_item` |
 | `skill_cast` | `skill` (id), `name`, `hero` | `scr_hero_proc_when_any_cast` |
@@ -594,6 +611,7 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 | `slorm.inst(id)` / `slorm.asset(name)` | `{"$inst": id}` / `{"$asset": name}` |
 | `slorm.null` | JSON null where Lua has no nil, e.g. "any" in patterns: `{ slorm.null, "abc*" }` |
 | `slorm.item_info(item)` / `slorm.slot_info(slot, hero?)` / `slorm.stat_info(stat, slot?, roll?, level?)` | game knowledge |
+| `slorm.hero_stats()` / `slorm.stat_list()` | the hero's final stats / every stat with its unit |
 | `slorm.settings{ {key=..., ...}, ... }` → values / `slorm.setting(key)` | your settings (kept up to date) |
 | `slorm.save_data(table)` / `slorm.load_data()` | your data file |
 | `slorm.log_file(...)` | a line in your log file |

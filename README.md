@@ -84,6 +84,7 @@ Call `Request` on the game thread (from a YYToolkit callback). Every request is 
 | `item_info` | `item` (an item array) or `inst` (a dropped item) or `equipped` (0-10: helm .. cape) | the item in readable form: slot, level, rarity, legendary, every stat with its name and value, extras |
 | `stat_info` / `legendary_info` / `skill_info` | `stat` (+ `slot`, `roll`, `level`) / `id` / `hero`, `id` | names and data from the game's own files; `stat_info` with a `roll` also gives its `value` on an item of `level` (100) |
 | `slot_info` | `slot` (helm .. cape), `hero` | the gold (epic) stats that can roll on that slot and the hero's lootable legendaries for it, by name |
+| `stat_list` / `hero_stats` | – | every stat of the game with its unit / the hero's current final stats, life, mana and Light Shield |
 | `mod_data` | `mod`, `value` | saves one JSON value for your mod (up to 4 MB) / without `value`: returns it (null when none) |
 | `mod_log` | `mod`, `line` | appends a timestamped line to your mod's log file |
 | `register_settings` / `settings` / `set_setting` | `mod`, `settings` / `mod` / `mod`, `key`, `value` | mod settings (below) |
@@ -121,7 +122,12 @@ frame, right after they happened, on the game thread.
 | `loot_dropped` | `loot` (the `obj_loot` instance), `item` (the item array, as in the save files), `info` (as `item_info`) |
 | `item_picked_up` | `items`, `picked` |
 | `gold_changed` | `gold`, `delta` |
-| `hero_hit` | `damage`, `attacker`, `life`, `max_life` |
+| `hero_hit` | `damage`, `attacker`, `life`, `max_life`, `shield`, `max_shield` |
+| `hit_dealt` | `target`, `skill`, `strike` (`normal` / `critical` / `ancestral`) — every hero hit |
+| `damage_dealt` | `target`, `damage` (the health it lost) |
+| `status_applied` / `status_removed` | `status` (`fire_burn`, `ice_chill`, `knight_bleed`...), `name`, `target`, + `duration`, `stacks` / `reason` |
+| `cooldown_started` | `skill`, `name`, `hero`, `cooldown` |
+| `stats_refreshed` | `hero` (the hero's stats were recalculated) |
 | `hero_died` | – (once per death) |
 | `level_up` | `level`, `previous`, `hero` (0 Knight, 1 Huntress, 2 Mage) |
 | `room_changed` | `room`, `previous` |
@@ -168,6 +174,7 @@ end)
 | `slorm.ui(menu, calls)` / `slorm.ui_remove(menu)` | your widgets in a menu; `slorm.text`, `slorm.button`, `slorm.radio`, `slorm.selector` make them |
 | `slorm.on_click(function(id, action) ... end)` | clicks on your widgets |
 | `slorm.item_info(item)` / `slorm.slot_info(slot, hero?)` / `slorm.stat_info(stat, slot?, roll?, level?)` | game knowledge (the commands above) |
+| `slorm.hero_stats()` / `slorm.stat_list()` | the hero's final stats / every stat with its unit |
 | `slorm.save_data(table)` / `slorm.load_data()` | keep your mod's own data between games (`mods/aurie/SlormAPI/data`) |
 | `slorm.log_file(...)` | a line in your mod's own log file (next to its data) |
 | `slorm.clock()` | seconds since the game started (for time budgets) |
