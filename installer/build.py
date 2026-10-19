@@ -38,7 +38,7 @@ What it changes (only in the game folder, never your saves)
   - "The Slormancer.exe" gets Aurie's small loader. The original is kept in mods\\slormancer-mods-backup\\.
   - It adds mods\\native\\AurieCore.dll, mods\\aurie\\YYToolkit.dll and {files},
     and writes mods\\slormancer-mods.json (what it added, so removing only removes that).
-  - Already using Slorm Loader (Vortex) or another version.dll mod loader? Then the game exe is left alone and only
+  - Already using another Aurie mod loader (a version.dll loader)? Then the game exe is left alone and only
     the mods are added: that loader starts them.
 
 Repair (keeps your mods and settings)

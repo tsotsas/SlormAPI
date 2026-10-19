@@ -13,9 +13,8 @@
 #   mods\aurie\SlormAPI.dll, mods\aurie\BuildFilter.dll    the mods
 #   mods\slormancer-mods.json  what this installer added (so removal only removes that)
 #
-# A game that already loads Aurie another way (Slorm Loader / Vortex: version.dll + plugins\AurieCore.asi, or another
-# version.dll loader) keeps that loader: the exe is not patched and only the mods are installed (two loaders would
-# start Aurie twice).
+# A game that already loads Aurie another way (a version.dll loader, e.g. version.dll + plugins\AurieCore.asi) keeps
+# that loader: the exe is not patched and only the mods are installed (two loaders would start Aurie twice).
 param(
     [ValidateSet('menu', 'install', 'update', 'repair', 'remove-mods', 'remove-all', 'status')][string]$Action = 'menu',
     [string]$GamePath = '',
@@ -95,7 +94,7 @@ function Test-Patched([string]$Exe) {
 }
 
 function Get-OtherLoader([string]$Game) {
-    if (Test-Path (Join-Path $Game 'plugins\AurieCore.asi')) { return 'Slorm Loader (version.dll + plugins\AurieCore.asi)' }
+    if (Test-Path (Join-Path $Game 'plugins\AurieCore.asi')) { return 'another Aurie mod loader (version.dll + plugins\AurieCore.asi)' }
     if (Test-Path (Join-Path $Game 'version.dll')) { return 'a version.dll mod loader' }
     return $null
 }

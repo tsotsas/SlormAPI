@@ -28,19 +28,19 @@ loot filter made twice - in C++ and in Lua - with the same features.
 ## Requirements
 - The Slormancer (Windows, Steam version)
 - The **Aurie** mod loader (Aurie Core 2.0.2 + YYToolkit 5.0.0): the installer below sets it up. A game that already
-  loads Aurie mods (for example with Slorm Loader / Vortex) works as it is.
+  loads Aurie mods another way works as it is.
 
 ## Install
 Easiest: **`SlormAPI-Installer-1.0.0.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
 it, close the game, double-click `Install.bat` and choose 1. It installs the Aurie loader (the official Aurie Core
 2.0.2 + YYToolkit 5.0.0c, checked against their release checksums) and SlormAPI, and can repair the loader after a
-game update or remove everything. When the game already uses Slorm Loader or another `version.dll` loader, it keeps
-that loader and adds only the mod.
+game update or remove everything. When the game already loads Aurie through another mod loader (a `version.dll`
+loader), it keeps that loader and adds only the mod.
 
-Manually or with Vortex (`SlormAPI-1.0.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
+Manually (`SlormAPI-1.0.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
 1. Have Aurie + YYToolkit for The Slormancer (https://github.com/AurieFramework/Aurie,
    https://github.com/AurieFramework/YYToolkit), or a game where Aurie mods already load.
-2. Unzip it into `<The Slormancer folder>` (or install it with Vortex).
+2. Unzip it into `<The Slormancer folder>`.
 
 Uninstall: delete `SlormAPI.dll` (or installer > 4). SlormAPI never writes your save files.
 
