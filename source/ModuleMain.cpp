@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <cstring>
 #include <set>
 #include <utility>
@@ -930,12 +931,22 @@ struct HookLayer
 	bool Live() const { return Expiry <= 0 || MicrosSinceStart() <= Expiry; }
 };
 
+// SlormAPI's own features hook game scripts in C++ too (e.g. the save around custom legendaries): Pre runs before the
+// original and may answer the call itself (return true: the original does not run), Post runs after it.
+struct NativeHook
+{
+	std::string Owner;
+	bool (*Pre)(CInstance* Self, int ArgCount, RValue** Args, RValue& Result) = nullptr;
+	void (*Post)(CInstance* Self, int ArgCount, RValue** Args, RValue& Result) = nullptr;
+};
+
 struct HookSlot
 {
 	std::string Name;
 	PVOID Trampoline = nullptr;
 	uint64_t Calls = 0;
 	std::vector<HookLayer> Layers;
+	std::vector<NativeHook> Natives;
 	HookLayer* Layer(const std::string& Owner)
 	{
 		for (auto& l : Layers)
@@ -1004,12 +1015,34 @@ static int g_CallDepth = 0;
 static int g_DetourDepth = 0;   // > 0 while a hooked call runs: TCP requests wait, slots are not freed
 
 template <size_t N>
+static RValue& HookDetourLayers(HookSlot& slot, PFUNC_YYGMLScript original, CInstance* Self, CInstance* Other, RValue& Result,
+	int ArgCount, RValue* Args[]);
+
+template <size_t N>
 static RValue& HookDetour(CInstance* Self, CInstance* Other, RValue& Result, int ArgCount, RValue* Args[])
 {
 	HookSlot& slot = g_Hooks[N];
 	auto original = reinterpret_cast<PFUNC_YYGMLScript>(slot.Trampoline);
 	slot.Calls++;
+	if (!slot.Natives.empty() && !g_InCapture)
+	{
+		for (size_t i = 0; i < slot.Natives.size(); ++i)   // (natives change only when SlormAPI installs one)
+			if (slot.Natives[i].Pre && slot.Natives[i].Pre(Self, ArgCount, Args, Result))
+				return Result;                           // answered by SlormAPI: the original does not run
+		RValue& r = slot.Layers.empty() ? original(Self, Other, Result, ArgCount, Args)
+			: HookDetourLayers<N>(slot, original, Self, Other, Result, ArgCount, Args);
+		for (size_t i = 0; i < slot.Natives.size(); ++i)
+			if (slot.Natives[i].Post) slot.Natives[i].Post(Self, ArgCount, Args, r);
+		return r;
+	}
 	if (slot.Layers.empty() || g_InCapture) return original(Self, Other, Result, ArgCount, Args);
+	return HookDetourLayers<N>(slot, original, Self, Other, Result, ArgCount, Args);
+}
+
+template <size_t N>
+static RValue& HookDetourLayers(HookSlot& slot, PFUNC_YYGMLScript original, CInstance* Self, CInstance* Other, RValue& Result,
+	int ArgCount, RValue* Args[])
+{
 	const bool perfOn = g_Perf;
 	const double perf0 = perfOn ? PerfNowUs() : 0;
 
@@ -1170,6 +1203,24 @@ static void RemoveHookSlot(size_t Slot)
 {
 	MmRemoveHook(g_ArSelfModule, "slorm_hook_" + std::to_string(Slot));
 	g_Hooks[Slot] = HookSlot{};
+}
+
+// installs (or replaces) SlormAPI's own C++ hook of Owner on a script; false when the script cannot be hooked
+static bool NativeHookInstall(const std::string& Script, const NativeHook& Hook)
+{
+	try
+	{
+		HookSlot& s = g_Hooks[InstallHook(Script)];
+		for (auto& n : s.Natives)
+			if (n.Owner == Hook.Owner) { n = Hook; return true; }
+		s.Natives.push_back(Hook);
+		return true;
+	}
+	catch (const std::exception& e)
+	{
+		DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] %s: %s", Script.c_str(), e.what());
+		return false;
+	}
 }
 
 // ============================================================================
@@ -1457,7 +1508,7 @@ static Json CmdUnhook(const Json& Req)
 		size_t removed = std::erase_if(s.Layers, [&](const HookLayer& l) { return all || l.Owner == owner; });
 		if (!removed) continue;
 		out.Push(Json(s.Name));
-		if (s.Layers.empty() && g_DetourDepth == 0) RemoveHookSlot(k);
+		if (s.Layers.empty() && s.Natives.empty() && g_DetourDepth == 0) RemoveHookSlot(k);
 	}
 	return out;
 }
@@ -1487,6 +1538,12 @@ static Json CmdHooks()
 			layers.Push(std::move(lj));
 		}
 		j.Add("layers", std::move(layers));
+		if (!s.Natives.empty())
+		{
+			Json natives = Json::Array();
+			for (auto& n : s.Natives) natives.Push(Json(n.Owner));
+			j.Add("native", std::move(natives));
+		}
 		out.Push(std::move(j));
 	}
 	return out;
@@ -1704,6 +1761,8 @@ static std::string SlotLabel(const std::string& Slot)
 	return Slot == "weapon" ? "Weapon" : Slot;
 }
 
+static bool CustomLegendary(int Ref, std::string& Name, std::string& Description);   // the custom legendaries (below)
+
 // an item array (as in save files, obj_loot.ar and the events) -> readable
 static Json ItemInfo(const Json& Ar)
 {
@@ -1729,7 +1788,8 @@ static Json ItemInfo(const Json& Ar)
 			int id = static_cast<int>(gd::Num(l.a[1]));
 			leg = Json::Object();
 			leg.Add("id", id);
-			leg.Add("name", d.LegName(id));
+			std::string cname, cdesc;
+			leg.Add("name", CustomLegendary(id, cname, cdesc) ? cname : d.LegName(id));
 			leg.Add("roll", l.a.size() > 2 ? gd::Num(l.a[2]) : 0.0);
 		}
 		else if ((tag == "MA" || tag == "AT" || tag == "RP") && l.a.size() > 2)
@@ -1899,6 +1959,15 @@ static Json CmdLegendaryInfo(const Json& Req)
 {
 	auto& d = Data();
 	int id = static_cast<int>(Req.GetNum("id", -1));
+	if (std::string cname, cdesc; CustomLegendary(id, cname, cdesc))
+	{
+		Json out = Json::Object();
+		out.Add("id", id);
+		out.Add("name", cname);
+		out.Add("description", cdesc);
+		out.Add("custom", true);
+		return out;
+	}
 	auto it = d.Legendaries.find(id);
 	if (it == d.Legendaries.end()) Fail("no legendary " + std::to_string(id));
 	const auto& l = it->second;
@@ -3539,6 +3608,875 @@ static Json CmdPerf(const Json& Req)
 	return j;
 }
 
+// ============================================================================
+// Buffs: the game's own buff list (scr_buff_list_add), which takes stats with it - the game's stat refresh, timers,
+// stacks and its buff bar do the rest. Used by custom legendaries and by the buff_add / buff_remove commands.
+// ============================================================================
+
+static RValue HeroInstance()
+{
+	RValue obj = AssetIndex("obj_parent_hero");
+	if (g_Yytk->CallBuiltin("instance_number", { obj }).ToDouble() < 1) return RValue();
+	return g_Yytk->CallBuiltin("instance_find", { obj, RValue(0.0) });
+}
+
+static std::string Fmt(double V)
+{
+	char b[32];
+	snprintf(b, sizeof(b), "%.10g", V);
+	return b;
+}
+
+// the definition row the game made for a buff key (created on its first add): names, its icon (another buff's), kind
+static void BuffDescribe(double Ref, const std::string& Name, const std::string& Description, const std::string& IconOf, bool Debuff)
+{
+	RValue* table = FindMember(GlobalRValue(), "buffs");
+	if (!table) return;
+	RValue* row = ArrayAt(*table, static_cast<size_t>(Ref));
+	if (!row || KindOf(*row) != VALUE_ARRAY) return;
+	auto put = [&](size_t I, const RValue& V) { if (RValue* c = ArrayAt(*row, I)) *c = V; };
+	if (!IconOf.empty())                                       // the icon of one of the game's buffs, by its key
+		for (size_t k = 0, n = ArrayLen(*table); k < n; ++k)
+		{
+			RValue* other = ArrayAt(*table, k);
+			RValue* key = other ? ArrayAt(*other, 1) : nullptr;
+			if (!key || KindOf(*key) != VALUE_STRING || key->ToString() != IconOf) continue;
+			if (RValue* spr = ArrayAt(*other, 2)) put(2, *spr);
+			if (RValue* frame = ArrayAt(*other, 3)) put(3, *frame);
+			break;
+		}
+	put(5, RStr(Debuff ? "debuff" : "buff"));
+	for (size_t c = 13; c + 1 < ArrayLen(*row); c += 2)
+	{
+		if (!Name.empty()) put(c, RStr(Name));
+		if (!Description.empty()) put(c + 1, RStr(Description));
+	}
+}
+
+// adds Stacks of a buff to Target: stats {key: value}, Seconds < 0 = until removed; returns the stacks it has now
+static double BuffAdd(const RValue& Target, const std::string& Key, const std::vector<std::pair<std::string, double>>& Stats,
+	double Seconds, int Stacks, int MaxStacks, const std::string& Name, const std::string& Description, const std::string& IconOf,
+	bool Debuff)
+{
+	if (Key.empty() || Key.find_first_of(",|") != std::string::npos) Fail("a buff key without , or |");
+	if (!IconOf.empty())                                       // the icon must be one of the game's buffs
+	{
+		bool found = false;
+		if (RValue* table = FindMember(GlobalRValue(), "buffs"))
+			for (size_t k = 0, n = ArrayLen(*table); k < n && !found; ++k)
+				if (RValue* row = ArrayAt(*table, k))
+					if (RValue* key = ArrayAt(*row, 1); key && KindOf(*key) == VALUE_STRING && key->ToString() == IconOf)
+						if (RValue* frame = ArrayAt(*row, 3); frame && IsNumeric(*frame)) found = true;
+		if (!found) Fail("icon '" + IconOf + "' is not one of the game's buffs (e.g. slow, fire_burn, ice_chill)");
+	}
+	std::string values, keys;
+	for (auto& [k, v] : Stats)
+	{
+		values += (values.empty() ? "" : ",") + Fmt(v);
+		keys += (keys.empty() ? "" : ",") + k;
+	}
+	CInstance* inst = Target.m_Instance;
+	double ticks = Seconds < 0 ? -1.0 : std::round(Seconds * 60.0);    // the game counts buff time 60 per second
+	// shown in the game's buff bar only with an icon (one of the game's buffs'): the bar reads the icon of every shown
+	// buff, and a buff the game made for a new key has none - hidden, like the game's own passives
+	bool shown = !IconOf.empty();
+	RValue r;
+	std::vector<RValue> args = { RStr(Key), RValue(ticks), Target, RValue(static_cast<double>((std::max)(1, Stacks))), RValue(shown),
+		RValue(shown), RStr(values), RStr(keys), RValue(static_cast<double>((std::max)(1, MaxStacks))) };
+	if (!AurieSuccess(g_Yytk->CallGameScriptEx(r, "gml_Script_scr_buff_list_add", inst, inst, args))) Fail("scr_buff_list_add failed");
+	if (IsNumeric(r) && shown) BuffDescribe(r.ToDouble(), Name, Description, IconOf, Debuff);
+	RValue n;
+	std::vector<RValue> q = { RStr(Key), Target };
+	g_Yytk->CallGameScriptEx(n, "gml_Script_scr_buff_list_get_stack", inst, inst, q);
+	return IsNumeric(n) ? n.ToDouble() : 0;
+}
+
+static double BuffStacks(const RValue& Target, const std::string& Key)
+{
+	RValue n;
+	std::vector<RValue> q = { RStr(Key), Target };
+	g_Yytk->CallGameScriptEx(n, "gml_Script_scr_buff_list_get_stack", Target.m_Instance, Target.m_Instance, q);
+	return IsNumeric(n) ? n.ToDouble() : 0;
+}
+
+static void BuffRemove(const RValue& Target, const std::string& Key)
+{
+	RValue r;
+	std::vector<RValue> q = { RStr(Key), Target };
+	g_Yytk->CallGameScriptEx(r, "gml_Script_scr_buff_list_remove", Target.m_Instance, Target.m_Instance, q);
+}
+
+static RValue BuffTarget(const Json& Req)
+{
+	if (const Json* t = Req.Find("target"); t && !t->IsNull()) return ResolveRoot(t);
+	RValue hero = HeroInstance();
+	if (KindOf(hero) == VALUE_UNDEFINED) Fail("no hero");
+	return RValue(InstanceById(static_cast<int32_t>(hero.ToInt64())));
+}
+
+static std::vector<std::pair<std::string, double>> StatsOf(const Json* J, double Scale = 1.0)
+{
+	std::vector<std::pair<std::string, double>> out;
+	if (!J) return out;
+	if (J->type != Json::Obj) Fail("'stats' is an object {stat: value}");
+	for (auto& [k, v] : J->o)
+	{
+		bool known = false;
+		for (auto& c : gd::kStatCatalog) known |= k == c.Key;
+		if (!known) Fail("unknown stat '" + k + "' (stat_list has every stat)");
+		// the game keeps these two old flat-knockback inputs, but its stat code crashes on them: not through buffs
+		if (k == "knockback_melee_add" || k == "knockback_projectile_add")
+			Fail("'" + k + "' cannot be given by a buff (the game's stat code does not take it); use the _percent one");
+		if (v.type != Json::Num) Fail("stat '" + k + "' takes a number");
+		out.emplace_back(k, v.n * Scale);
+	}
+	return out;
+}
+
+// {target?, key, stats?, duration? (seconds), stacks?, max_stacks?, name?, description?, icon? (a game buff key), debuff?}
+static Json CmdBuffAdd(const Json& Req)
+{
+	RValue target = BuffTarget(Req);
+	double stacks = BuffAdd(target, Req.GetStr("key"), StatsOf(Req.Find("stats")), Req.GetNum("duration", -1),
+		static_cast<int>(Req.GetNum("stacks", 1)), static_cast<int>(Req.GetNum("max_stacks", 1)), Req.GetStr("name"),
+		Req.GetStr("description"), Req.GetStr("icon"), Req.GetBool("debuff", false));
+	return Json(stacks);
+}
+static Json CmdBuffRemove(const Json& Req) { BuffRemove(BuffTarget(Req), Req.GetStr("key")); return Json(true); }
+static Json CmdBuffStacks(const Json& Req) { return Json(BuffStacks(BuffTarget(Req), Req.GetStr("key"))); }
+
+// ============================================================================
+// Custom legendaries: rows appended to the game's own legendary table (global.legendary), so they drop, show up in
+// reforging, show their name and description and count as equipped like the game's own. Their stats are a passive
+// game buff on the hero while one is worn (scaled by the item's legendary roll, like the game's); the rows are never
+// "stat-only", so the game's own equipment calculator - which caches those rows - never works on them. Effects run on
+// SlormAPI's events with the game's buffs. Saves never hold them: around the game's save of the inventory each custom legendary is
+// written as an Epic with the same stats, turned back after loading (data/legendary_items.json) - a game without
+// SlormAPI just finds ordinary Epics.
+// ============================================================================
+
+namespace legend
+{
+	struct Effect
+	{
+		std::string Trigger;                 // hit, crit, ancestral, kill, boss_kill, hero_hit, cast, status, every
+		std::string Status;                  // trigger "status": the status key that must be applied ("" = any)
+		double Chance = 100, Cooldown = 0, Every = 0, Last = -1e18;
+		bool Scale = true;                   // amounts scale with the item's legendary roll (75-100%), like the game's
+		Json Buff, Heal;
+	};
+	struct Def
+	{
+		std::string Id, Owner, Local, Name, Description, Slot, Icon;
+		int Hero = -1, Ref = -1, TemplateRef = 8;
+		bool Lootable = true, Active = true;
+		std::vector<std::pair<std::string, double>> Stats;
+		std::vector<double> Values;          // more numbers for the description's @ (not stats)
+		std::vector<Effect> Effects;
+	};
+	std::vector<Def> Defs;
+	int Base = -1;                           // the table's size before the first custom legendary
+	uint64_t Version = 0;
+	std::vector<uint64_t> Subs;              // event subscriptions for the effects
+
+	Def* ByRef(double Ref)
+	{
+		for (auto& d : Defs) if (d.Ref == static_cast<int>(Ref) && d.Ref >= 0) return &d;
+		return nullptr;
+	}
+	Def* ById(const std::string& Id)
+	{
+		for (auto& d : Defs) if (d.Id == Id) return &d;
+		return nullptr;
+	}
+	bool IsCustom(const RValue& V)
+	{
+		if (Defs.empty()) return false;
+		double ref = -1;
+		if (IsNumeric(V)) ref = V.ToDouble();
+		else if (KindOf(V) == VALUE_STRING) { try { ref = std::stod(V.ToString()); } catch (...) { return false; } }
+		return ref >= Base && ByRef(ref) != nullptr;
+	}
+
+	void RefreshHero()
+	{
+		RValue hero = HeroInstance();
+		if (KindOf(hero) == VALUE_UNDEFINED) return;
+		CInstance* h = InstanceById(static_cast<int32_t>(hero.ToInt64()));
+		RValue r;
+		g_Yytk->CallGameScriptEx(r, "gml_Script_scr_hero_fast_check_reset", h, h, {});   // the per-legendary caches
+		for (const char* f : { "self_refresh_equipment", "self_refresh_legendaries", "self_refresh_stats" })
+			g_Yytk->CallBuiltin("variable_instance_set", { RValue(h), RValue(f), RValue(true) });
+	}
+
+	// ---- the table row
+	RValue BuildRow(const Def& D, RValue& Table)
+	{
+		size_t n = ArrayLen(Table), tmpl = SIZE_MAX;
+		for (size_t i = 0; i < static_cast<size_t>(Base) && i < n && tmpl == SIZE_MAX; ++i)   // one of the game's of that slot
+		{
+			RValue* row = ArrayAt(Table, i);
+			RValue* slot = row ? ArrayAt(*row, 13) : nullptr;
+			if (slot && KindOf(*slot) == VALUE_STRING && slot->ToString() == D.Slot) tmpl = i;
+		}
+		if (tmpl == SIZE_MAX) tmpl = 8;
+		RValue* src = ArrayAt(Table, tmpl);
+		if (!src || ArrayLen(*src) < 21) Fail("unexpected legendary table");
+		std::vector<RValue> row;
+		for (size_t c = 0, m = ArrayLen(*src); c < m; ++c) row.push_back(*ArrayAt(*src, c));
+		// the description's @ numbers (stats first, then the extra values); no STAT: SlormAPI applies the stats itself
+		std::string value, stat, type, upgrade, range;
+		bool first = true;
+		auto add = [&](double V, bool Pct)
+		{
+			std::string sep = first ? "" : "|";
+			first = false;
+			value += sep + Fmt(V); stat += sep; type += sep + (Pct ? "%" : ""); upgrade += sep + "0"; range += sep + "1";
+		};
+		if (D.Active)
+		{
+			for (auto& [k, v] : D.Stats) add(v, k.ends_with("_percent") || k.ends_with("_mult"));
+			for (double v : D.Values) add(v, false);
+		}
+		row[0] = RValue(static_cast<double>(D.Ref));
+		row[1] = RStr("");
+		row[2] = RStr(value);
+		row[3] = RStr(stat);
+		row[9] = RValue(static_cast<double>(D.Hero));
+		row[10] = RStr("");
+		row[11] = RStr(type);
+		row[12] = RStr(upgrade);
+		row[13] = RStr(D.Slot);
+		if (!D.Icon.empty())                                    // the icon of one of the game's legendaries, by its number
+			if (RValue* other = ArrayAt(Table, static_cast<size_t>(std::stoi(D.Icon))))
+				if (RValue* ic = ArrayAt(*other, 14)) row[14] = *ic;
+		row[15] = RStr(range);
+		row[16] = RValue(D.Lootable && D.Active ? 1.0 : 0.0);
+		row[17] = RValue(0.0);                                  // not stat-only: the game's equipment calculator skips it
+		std::string name = D.Active ? D.Name : D.Name + " (mod off)";
+		for (size_t c = 19; c + 1 < row.size(); c += 2) { row[c] = RStr(name); row[c + 1] = RStr(D.Description); }
+		return RValue(row);
+	}
+
+	void WriteRow(Def& D)
+	{
+		RValue* table = FindMember(GlobalRValue(), "legendary");
+		if (!table || KindOf(*table) != VALUE_ARRAY) Fail("the game's legendary table is not loaded yet");
+		if (Base < 0) Base = static_cast<int>(ArrayLen(*table));
+		if (D.Ref < 0) D.Ref = static_cast<int>(ArrayLen(*table));
+		RValue row = BuildRow(D, *table);
+		g_Yytk->CallBuiltin("array_set", { *table, RValue(static_cast<double>(D.Ref)), row });
+	}
+
+	// ---- saves: custom legendaries are saved as Epics; the Epics are known again by their exact contents
+	std::map<std::string, Json> Saved;          // fingerprint of the Epic -> {"id", "line": the L line}
+	bool SavedLoaded = false, SavedDirty = false;
+	fs::path SavedFile() { return AurieDir() / "SlormAPI" / "data" / "legendary_items.json"; }
+
+	void LoadSaved()
+	{
+		if (SavedLoaded) return;
+		SavedLoaded = true;
+		std::ifstream f(SavedFile(), std::ios::binary);
+		if (!f) return;
+		std::stringstream ss;
+		ss << f.rdbuf();
+		try
+		{
+			Json j = sj::Parse(ss.str());
+			if (const Json* items = j.Find("items"); items && items->type == Json::Obj)
+				for (auto& [k, v] : items->o) Saved[k] = v;
+		}
+		catch (const std::exception&) {}
+	}
+
+	void WriteSaved()
+	{
+		Json items = Json::Object();
+		for (auto& [k, v] : Saved) items.Add(k, v);
+		Json j = Json::Object();
+		j.Add("version", 1);
+		j.Add("items", std::move(items));
+		std::error_code ec;
+		fs::create_directories(SavedFile().parent_path(), ec);
+		fs::path tmp = SavedFile();
+		tmp += ".tmp";
+		{ std::ofstream o(tmp, std::ios::binary | std::ios::trunc); o << sj::Dump(j); }
+		fs::rename(tmp, SavedFile(), ec);
+		SavedDirty = false;
+	}
+
+	// every value as text, so the same item matches before a save and after a load ("98" == 98, false == "0")
+	void Print(const RValue& V, std::string& Out, int Depth = 0)
+	{
+		if (Depth > 4) return;
+		if (KindOf(V) == VALUE_ARRAY)
+		{
+			Out += '[';
+			RValue copy = V;
+			for (size_t k = 0, n = ArrayLen(copy); k < n; ++k)
+			{
+				if (k) Out += ',';
+				if (RValue* e = ArrayAt(copy, k)) Print(*e, Out, Depth + 1);
+			}
+			Out += ']';
+		}
+		else if (KindOf(V) == VALUE_STRING) Out += V.ToString();
+		else if (KindOf(V) == VALUE_BOOL) Out += V.ToBoolean() ? "1" : "0";
+		else if (IsNumeric(V)) Out += Fmt(V.ToDouble());
+	}
+	std::string Fingerprint(const RValue& Item) { std::string s; Print(Item, s); return s; }
+
+	bool IsItem(const RValue& V)
+	{
+		if (KindOf(V) != VALUE_ARRAY || ArrayLen(V) < 1) return false;
+		RValue copy = V;
+		RValue* h = ArrayAt(copy, 0);
+		RValue* kind = h && KindOf(*h) == VALUE_ARRAY ? ArrayAt(*h, 3) : nullptr;
+		return kind && KindOf(*kind) == VALUE_STRING && kind->ToString() == "equipment";
+	}
+
+	// the custom legendary an item carries (and the index of its L line), or nullptr
+	Def* CustomOf(RValue& Item, size_t& Line)
+	{
+		for (size_t k = 1, n = ArrayLen(Item); k < n; ++k)
+		{
+			RValue* l = ArrayAt(Item, k);
+			RValue* tag = l && KindOf(*l) == VALUE_ARRAY ? ArrayAt(*l, 0) : nullptr;
+			if (!tag || KindOf(*tag) != VALUE_STRING || tag->ToString() != "L") continue;
+			RValue* ref = ArrayAt(*l, 1);
+			if (ref && IsCustom(*ref)) { Line = k; return ByRef(IsNumeric(*ref) ? ref->ToDouble() : std::stod(ref->ToString())); }
+			return nullptr;
+		}
+		return nullptr;
+	}
+
+	RValue Header(RValue& Item, const char* Rarity)
+	{
+		RValue* h = ArrayAt(Item, 0);
+		std::vector<RValue> out;
+		for (size_t c = 0, n = h ? ArrayLen(*h) : 0; c < n; ++c) out.push_back(*ArrayAt(*h, c));
+		if (!out.empty()) out[0] = RStr(Rarity);
+		return RValue(out);
+	}
+
+	// the Epic a custom legendary is saved as: the same item without its L line
+	RValue Fallback(RValue& Item, size_t Line)
+	{
+		std::vector<RValue> out = { Header(Item, "epic") };
+		for (size_t k = 1, n = ArrayLen(Item); k < n; ++k)
+			if (k != Line) out.push_back(*ArrayAt(Item, k));
+		return RValue(out);
+	}
+
+	// every item slot of the heroes' inventories (equipped, bag, stash)
+	template <class F> void EachSlot(F Fn)
+	{
+		RValue* inv = FindMember(GlobalRValue(), "inventory");
+		if (!inv || KindOf(*inv) != VALUE_ARRAY) return;
+		for (size_t h = 0, nh = ArrayLen(*inv); h < nh; ++h)
+		{
+			RValue* hero = ArrayAt(*inv, h);
+			if (!hero || KindOf(*hero) != VALUE_ARRAY) continue;
+			for (size_t i = 0, ni = ArrayLen(*hero); i < ni; ++i)
+				if (RValue* slot = ArrayAt(*hero, i); slot && IsItem(*slot)) Fn(h, i, *slot);
+		}
+	}
+
+	struct Swap { size_t Hero, Index; RValue Original; };
+	std::vector<Swap> Swaps;
+
+	RValue* SlotAt(size_t Hero, size_t Index)
+	{
+		RValue* inv = FindMember(GlobalRValue(), "inventory");
+		RValue* hero = inv ? ArrayAt(*inv, Hero) : nullptr;
+		return hero ? ArrayAt(*hero, Index) : nullptr;
+	}
+
+	bool PreSave(CInstance*, int ArgCount, RValue** Args, RValue&)
+	{
+		if (Defs.empty() || ArgCount < 1 || !Args[0] || KindOf(*Args[0]) != VALUE_STRING || Args[0]->ToString() != "inventory") return false;
+		LoadSaved();
+		Swaps.clear();
+		EachSlot([&](size_t H, size_t I, RValue& Item)
+		{
+			size_t line = 0;
+			Def* d = CustomOf(Item, line);
+			if (!d) return;
+			RValue fallback = Fallback(Item, line);
+			Json rec = Json::Object();
+			rec.Add("id", d->Id);
+			rec.Add("line", ToJson(*ArrayAt(Item, line), 2));
+			std::string fp = Fingerprint(fallback);
+			if (!Saved.count(fp) || sj::Dump(Saved[fp]) != sj::Dump(rec)) { Saved[fp] = rec; SavedDirty = true; }
+			Swaps.push_back({ H, I, Item });
+			Item = fallback;
+		});
+		return false;                                            // the game saves the Epics
+	}
+
+	void PostSave(CInstance*, int ArgCount, RValue** Args, RValue&)
+	{
+		for (auto& s : Swaps)
+			if (RValue* slot = SlotAt(s.Hero, s.Index)) *slot = s.Original;
+		bool any = !Swaps.empty();
+		Swaps.clear();
+		if (SavedDirty) WriteSaved();
+		(void)ArgCount; (void)Args; (void)any;
+	}
+
+	// Epics that were custom legendaries when they were saved become them again (after a load, or when one registers)
+	int Restore()
+	{
+		LoadSaved();
+		if (Saved.empty() || Defs.empty()) return 0;
+		int restored = 0;
+		EachSlot([&](size_t, size_t, RValue& Item)
+		{
+			RValue* h = ArrayAt(Item, 0);
+			RValue* rarity = h ? ArrayAt(*h, 0) : nullptr;
+			if (!rarity || KindOf(*rarity) != VALUE_STRING || rarity->ToString() != "epic") return;
+			auto it = Saved.find(Fingerprint(Item));
+			if (it == Saved.end()) return;
+			Def* d = ById(it->second.GetStr("id"));
+			if (!d || d->Ref < 0) return;
+			Json line = it->second.At("line");
+			if (line.type != Json::Arr || line.a.size() < 3) return;
+			line.a[1] = Json(static_cast<double>(d->Ref));        // this session's number for it
+			std::vector<RValue> out = { Header(Item, "legendary"), FromJson(line) };
+			for (size_t k = 1, n = ArrayLen(Item); k < n; ++k) out.push_back(*ArrayAt(Item, k));
+			Item = RValue(out);
+			++restored;
+		});
+		if (restored) RefreshHero();
+		return restored;
+	}
+
+	void PostLoad(CInstance*, int, RValue**, RValue&) { Restore(); }
+
+	// last line of defence: a custom legendary number never reaches a save file (another container than the
+	// inventory, e.g. the shop): the save gets the game's own legendary its row was copied from
+	thread_local RValue g_SafeRef;
+	bool PreDeconstruct(CInstance*, int ArgCount, RValue** Args, RValue&)
+	{
+		if (Defs.empty() || ArgCount < 3 || !Args[0] || !Args[2] || !IsNumeric(*Args[2]) || Args[2]->ToDouble() != 1) return false;
+		if (!IsCustom(*Args[0])) return false;
+		Def* d = ByRef(IsNumeric(*Args[0]) ? Args[0]->ToDouble() : std::stod(Args[0]->ToString()));
+		g_SafeRef = RValue(static_cast<double>(d ? d->TemplateRef : 8));
+		Args[0] = &g_SafeRef;
+		return false;
+	}
+
+	// the legendary storage keeps one slot per game legendary: custom ones are never "owned" there
+	bool PreStorageOwned(CInstance*, int ArgCount, RValue** Args, RValue& Result)
+	{
+		if (ArgCount < 1 || !Args[0] || !IsCustom(*Args[0])) return false;
+		Result = RValue(false);
+		return true;
+	}
+
+	// and if one ever lands in the storage area, it goes back to the bag
+	double WatchAt = 0;
+	void Watch()
+	{
+		auto num = [](const char* N) { RValue* v = FindMember(GlobalRValue(), N); return v && IsNumeric(*v) ? v->ToDouble() : -1; };
+		double ch = num("character_slots"), inv = num("inventory_slots"), mat = num("material_slots"), st = num("storage_slots"),
+			leg = num("storage_legendary_slots");
+		if (ch < 0 || inv < 0 || mat < 0 || st < 0 || leg < 0) return;
+		size_t start = static_cast<size_t>(ch + inv + mat + st - leg), bag0 = static_cast<size_t>(ch), bag1 = static_cast<size_t>(ch + inv);
+		RValue* all = FindMember(GlobalRValue(), "inventory");
+		for (size_t h = 0, nh = all ? ArrayLen(*all) : 0; h < nh; ++h)
+		{
+			RValue* hero = ArrayAt(*all, h);
+			if (!hero || KindOf(*hero) != VALUE_ARRAY) continue;
+			for (size_t i = start, n = ArrayLen(*hero); i < n; ++i)
+			{
+				RValue* slot = ArrayAt(*hero, i);
+				size_t line = 0;
+				if (!slot || !IsItem(*slot) || !CustomOf(*slot, line)) continue;
+				for (size_t b = bag0; b < bag1; ++b)
+					if (RValue* free = ArrayAt(*hero, b); free && !IsItem(*free) && KindOf(*free) != VALUE_ARRAY)
+					{
+						*free = *slot;
+						*slot = RValue(0.0);
+						DbgPrintEx(LOG_SEVERITY_INFO, "[SlormAPI] a custom legendary was moved out of the legendary storage to the bag");
+						break;
+					}
+			}
+		}
+	}
+
+	bool Hooked = false;
+	void EnsureHooks()
+	{
+		if (Hooked) return;
+		Hooked = true;
+		NativeHookInstall("scr_save_save", { "SlormAPI.legendary", PreSave, PostSave });
+		NativeHookInstall("scr_save_load", { "SlormAPI.legendary", nullptr, PostLoad });
+		NativeHookInstall("scr_loot_save_deconstruct", { "SlormAPI.legendary", PreDeconstruct, nullptr });
+		NativeHookInstall("scr_storage_check_if_legendary_owned", { "SlormAPI.legendary", PreStorageOwned, nullptr });
+	}
+
+	// ---- effects
+	std::map<int, double> Equipped;             // ref -> legendary roll, read once per frame
+	uint64_t EquippedAt = UINT64_MAX;
+
+	void ReadEquipped()
+	{
+		if (EquippedAt == g_CodeEvents) return;
+		EquippedAt = g_CodeEvents;
+		Equipped.clear();
+		RValue hero = HeroInstance();
+		if (KindOf(hero) == VALUE_UNDEFINED) return;
+		RValue list = g_Yytk->CallBuiltin("variable_instance_get", { hero, RValue("legendaries_equipped") });
+		for (size_t k = 0, n = ArrayLen(list); k < n; ++k)
+		{
+			RValue* row = ArrayAt(list, k);
+			RValue* ref = row ? ArrayAt(*row, 2) : nullptr;
+			if (!ref || !IsNumeric(*ref) || !ByRef(ref->ToDouble())) continue;
+			double roll = 100;
+			if (RValue* item = ArrayAt(*row, 0))
+			{
+				size_t line = 0;
+				if (CustomOf(*item, line))
+					if (RValue* r = ArrayAt(*ArrayAt(*item, line), 2))
+						roll = IsNumeric(*r) ? r->ToDouble() : std::atof(r->ToString().c_str());
+			}
+			Equipped[static_cast<int>(ref->ToDouble())] = (std::max)(Equipped[static_cast<int>(ref->ToDouble())], roll);
+		}
+	}
+
+	std::mt19937_64 Rng{ std::random_device{}() };
+
+	void Run(Def& D, Effect& E, double Roll)
+	{
+		double now = MicrosSinceStart() / 1e6;
+		if (now - E.Last < E.Cooldown) return;
+		if (E.Chance < 100 && std::uniform_real_distribution<double>(0, 100)(Rng) >= E.Chance) return;
+		E.Last = now;
+		double scale = E.Scale ? Roll / 100.0 : 1.0;
+		RValue hero = HeroInstance();
+		if (KindOf(hero) == VALUE_UNDEFINED) return;
+		RValue target(InstanceById(static_cast<int32_t>(hero.ToInt64())));
+		if (E.Buff.type == Json::Obj)
+		{
+			size_t idx = &E - D.Effects.data();
+			std::string key = "slormapi_" + D.Owner + "_" + D.Local + "_" + std::to_string(idx);
+			for (auto& c : key) if (!isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
+			BuffAdd(target, key, StatsOf(E.Buff.Find("stats"), scale), E.Buff.GetNum("duration", 5), 1,
+				static_cast<int>(E.Buff.GetNum("max_stacks", 1)), E.Buff.GetStr("name", D.Name), E.Buff.GetStr("description"),
+				E.Buff.GetStr("icon"), false);
+		}
+		if (E.Heal.type == Json::Obj)
+		{
+			auto get = [&](const char* V) { RValue v = g_Yytk->CallBuiltin("variable_instance_get", { target, RValue(V) }); return IsNumeric(v) ? v.ToDouble() : 0; };
+			auto set = [&](const char* V, double X) { g_Yytk->CallBuiltin("variable_instance_set", { target, RValue(V), RValue(X) }); };
+			double life = get("the_health"), maxLife = get("final_the_max_health"), mana = get("the_mana"), maxMana = get("final_the_max_mana");
+			double addLife = (E.Heal.GetNum("life", 0) + maxLife * E.Heal.GetNum("life_percent", 0) / 100) * scale;
+			double addMana = (E.Heal.GetNum("mana", 0) + maxMana * E.Heal.GetNum("mana_percent", 0) / 100) * scale;
+			double addShield = (E.Heal.GetNum("shield", 0) + maxLife * E.Heal.GetNum("shield_percent", 0) / 100) * scale;
+			if (addLife > 0 && life > 0) set("the_health", (std::min)(maxLife, life + addLife));
+			if (addMana > 0) set("the_mana", (std::min)(maxMana, mana + addMana));
+			if (addShield > 0)                                      // the Light Shield: its balance and its reference total
+			{
+				double shield = get("the_shield") + addShield;
+				set("the_shield", shield);
+				set("the_max_shield", (std::max)(get("the_max_shield"), shield));
+			}
+		}
+	}
+
+	void OnEvent(const char* Event, const char* DataJson, void*)
+	{
+		ReadEquipped();
+		if (Equipped.empty()) return;
+		std::string ev = Event;
+		Json data;
+		bool parsed = false;
+		for (auto& d : Defs)
+		{
+			if (!d.Active || d.Ref < 0) continue;
+			auto eq = Equipped.find(d.Ref);
+			if (eq == Equipped.end()) continue;
+			for (auto& e : d.Effects)
+			{
+				bool hit = false;
+				if (e.Trigger == "hit" || e.Trigger == "crit" || e.Trigger == "ancestral")
+				{
+					if (ev != "hit_dealt") continue;
+					if (!parsed) { data = sj::Parse(DataJson ? DataJson : "{}"); parsed = true; }
+					std::string strike = data.GetStr("strike");
+					hit = e.Trigger == "hit" || (e.Trigger == "crit" && strike == "critical") || (e.Trigger == "ancestral" && strike == "ancestral");
+				}
+				else if (e.Trigger == "kill") hit = ev == "enemy_killed";
+				else if (e.Trigger == "boss_kill") hit = ev == "boss_killed";
+				else if (e.Trigger == "hero_hit") hit = ev == "hero_hit";
+				else if (e.Trigger == "cast") hit = ev == "skill_cast";
+				else if (e.Trigger == "status" && ev == "status_applied")
+				{
+					if (!parsed) { data = sj::Parse(DataJson ? DataJson : "{}"); parsed = true; }
+					hit = e.Status.empty() || data.GetStr("status") == e.Status;
+				}
+				if (hit) Run(d, e, eq->second);
+			}
+		}
+	}
+
+	// the stats of the worn custom legendaries: one passive buff each, kept while it is worn
+	std::map<std::string, double> Applied;      // def id -> the roll its buff was made for
+	double PassiveAt = 0;
+
+	std::string PassiveKey(const Def& D)
+	{
+		std::string key = "slormapi_leg_" + D.Owner + "_" + D.Local;
+		for (auto& c : key) if (!isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
+		return key;
+	}
+
+	void Passives()
+	{
+		RValue hero = HeroInstance();
+		if (KindOf(hero) == VALUE_UNDEFINED) { Applied.clear(); return; }
+		RValue target(InstanceById(static_cast<int32_t>(hero.ToInt64())));
+		ReadEquipped();
+		bool changed = false;
+		for (auto& d : Defs)
+		{
+			if (d.Stats.empty() && !Applied.count(d.Id)) continue;
+			std::string key = PassiveKey(d);
+			auto eq = Equipped.find(d.Ref);
+			bool want = d.Active && !d.Stats.empty() && eq != Equipped.end();
+			auto ap = Applied.find(d.Id);
+			if (!want)
+			{
+				if (ap != Applied.end()) { BuffRemove(target, key); Applied.erase(ap); changed = true; }
+				continue;
+			}
+			if (ap != Applied.end() && ap->second == eq->second && BuffStacks(target, key) > 0) continue;
+			BuffRemove(target, key);                               // (a room change, a new roll or new stats: made again)
+			std::vector<std::pair<std::string, double>> stats;
+			for (auto& [k, v] : d.Stats) stats.emplace_back(k, v * eq->second / 100.0);
+			BuffAdd(target, key, stats, -1, 1, 1, "", "", "", false);
+			Applied[d.Id] = eq->second;
+			changed = true;
+		}
+		if (changed)
+			g_Yytk->CallBuiltin("variable_instance_set", { target, RValue("self_refresh_stats"), RValue(true) });
+	}
+
+	void Tick()
+	{
+		if (Defs.empty()) return;
+		double now = MicrosSinceStart() / 1e6;
+		if (now >= PassiveAt) { PassiveAt = now + 0.25; Passives(); }
+		bool every = false;
+		for (auto& d : Defs) for (auto& e : d.Effects) every |= e.Trigger == "every";
+		if (every)
+		{
+			ReadEquipped();
+			for (auto& d : Defs)
+			{
+				auto eq = Equipped.find(d.Ref);
+				if (!d.Active || eq == Equipped.end()) continue;
+				for (auto& e : d.Effects)
+					if (e.Trigger == "every" && now - e.Last >= (std::max)(0.1, e.Every)) Run(d, e, eq->second);
+			}
+		}
+		if (now >= WatchAt) { WatchAt = now + 0.5; Watch(); }
+	}
+
+	// subscribe to exactly the events the active effects need
+	void SyncSubs()
+	{
+		for (auto id : Subs) events::Unsubscribe(id);
+		Subs.clear();
+		std::set<std::string> want;
+		static const std::map<std::string, std::string> evOf = { { "hit", "hit_dealt" }, { "crit", "hit_dealt" },
+			{ "ancestral", "hit_dealt" }, { "kill", "enemy_killed" }, { "boss_kill", "boss_killed" }, { "hero_hit", "hero_hit" },
+			{ "cast", "skill_cast" }, { "status", "status_applied" } };
+		for (auto& d : Defs)
+			if (d.Active)
+				for (auto& e : d.Effects)
+					if (auto it = evOf.find(e.Trigger); it != evOf.end()) want.insert(it->second);
+		for (auto& ev : want) Subs.push_back(events::Subscribe(ev, OnEvent, nullptr));
+	}
+
+	Effect ParseEffect(const Json& J)
+	{
+		static const std::set<std::string> triggers = { "hit", "crit", "ancestral", "kill", "boss_kill", "hero_hit", "cast", "status",
+			"every" };
+		Effect e;
+		e.Trigger = J.GetStr("trigger");
+		if (!triggers.count(e.Trigger)) Fail("effect trigger '" + e.Trigger + "' (hit, crit, ancestral, kill, boss_kill, hero_hit, cast, status, every)");
+		e.Status = J.GetStr("status_key");
+		e.Chance = J.GetNum("chance", 100);
+		e.Cooldown = J.GetNum("cooldown", 0);
+		e.Every = J.GetNum("seconds", 1);
+		e.Scale = J.GetBool("scale_with_roll", true);
+		if (const Json* b = J.Find("buff")) { e.Buff = *b; StatsOf(e.Buff.Find("stats")); }
+		if (const Json* h = J.Find("heal")) e.Heal = *h;
+		if (e.Buff.type != Json::Obj && e.Heal.type != Json::Obj) Fail("an effect needs a buff or a heal");
+		return e;
+	}
+
+	// {owner, id, name, description, slot, hero?, lootable?, stats?, values?, icon?, effects?}
+	Json Register(const Json& Req)
+	{
+		Def d;
+		d.Owner = Req.GetStr("owner");
+		d.Local = Req.GetStr("id");
+		if (d.Owner.empty()) Fail("register_legendary needs your mod's name as owner");
+		if (d.Local.empty()) Fail("register_legendary needs an id");
+		d.Id = d.Owner + ":" + d.Local;
+		d.Name = Req.GetStr("name", d.Local);
+		d.Description = Req.GetStr("description");
+		d.Slot = Req.GetStr("slot");
+		bool known = false;
+		for (auto& s : gd::Slots()) known |= d.Slot == s.Key;
+		if (!known) Fail("slot '" + d.Slot + "' (helm body shoulder bracer glove boot ring amulet belt cape)");
+		d.Hero = static_cast<int>(Req.GetNum("hero", -1));
+		d.Lootable = Req.GetBool("lootable", true);
+		d.Stats = StatsOf(Req.Find("stats"));
+		if (const Json* v = Req.Find("values"); v && v->type == Json::Arr)
+			for (auto& x : v->a) d.Values.push_back(x.type == Json::Num ? x.n : 0);
+		if (const Json* ic = Req.Find("icon"); ic && ic->type == Json::Num) d.Icon = std::to_string(static_cast<int>(ic->n));
+		if (const Json* fx = Req.Find("effects"); fx && fx->type == Json::Arr)
+			for (auto& e : fx->a) d.Effects.push_back(ParseEffect(e));
+		EnsureHooks();
+		Def* old = ById(d.Id);
+		if (old) { d.Ref = old->Ref; d.TemplateRef = old->TemplateRef; *old = d; }
+		else Defs.push_back(d);
+		Def& cur = old ? *old : Defs.back();
+		WriteRow(cur);
+		cur.TemplateRef = 8;                                     // the game's legendary a save falls back to (same slot)
+		if (RValue* table = FindMember(GlobalRValue(), "legendary"))
+			for (size_t i = 0; i < static_cast<size_t>(Base); ++i)
+				if (RValue* row = ArrayAt(*table, i); row && ArrayAt(*row, 13) && KindOf(*ArrayAt(*row, 13)) == VALUE_STRING
+					&& ArrayAt(*row, 13)->ToString() == cur.Slot) { cur.TemplateRef = static_cast<int>(i); break; }
+		++Version;
+		SyncSubs();
+		RefreshHero();
+		Restore();
+		Applied.erase(cur.Id);                                   // its stats may have changed: the buff is made again
+		Json out = Json::Object();
+		out.Add("id", cur.Id);
+		out.Add("ref", cur.Ref);
+		return out;
+	}
+
+	// a mod's legendaries stay in the table (items keep their numbers) but stop dropping and doing anything
+	void Unregister(const std::string& Owner, const std::string& Local = "")
+	{
+		bool changed = false;
+		for (auto& d : Defs)
+			if (d.Owner == Owner && (Local.empty() || d.Local == Local) && d.Active)
+			{
+				d.Active = false;
+				try { WriteRow(d); } catch (const std::exception&) {}
+				changed = true;
+			}
+		if (changed) { ++Version; SyncSubs(); RefreshHero(); }
+	}
+
+	Json List()
+	{
+		ReadEquipped();
+		Json out = Json::Array();
+		for (auto& d : Defs)
+		{
+			Json j = Json::Object();
+			j.Add("id", d.Id);
+			j.Add("ref", d.Ref);
+			j.Add("name", d.Name);
+			j.Add("slot", d.Slot);
+			j.Add("owner", d.Owner);
+			j.Add("active", d.Active);
+			auto eq = Equipped.find(d.Ref);
+			j.Add("equipped", eq != Equipped.end() ? Json(eq->second) : Json());
+			out.Push(std::move(j));
+		}
+		return out;
+	}
+
+	Def& Find(const Json& Req)
+	{
+		std::string id = Req.GetStr("id");
+		Def* d = ById(id);
+		if (!d && !Req.GetStr("owner").empty()) d = ById(Req.GetStr("owner") + ":" + id);
+		if (!d) Fail("no custom legendary '" + id + "'");
+		return *d;
+	}
+
+	// a drop of that legendary at the hero (for testing and rewards): an equipment drop of its slot, made legendary
+	Json Drop(const Json& Req)
+	{
+		Def& d = Find(Req);
+		RValue hero = HeroInstance();
+		if (KindOf(hero) == VALUE_UNDEFINED) Fail("no hero");
+		CInstance* h = InstanceById(static_cast<int32_t>(hero.ToInt64()));
+		RValue lootObj = AssetIndex("obj_loot");
+		double roll = Req.GetNum("roll", 100);
+		for (int tries = 0; tries < 80; ++tries)
+		{
+			std::set<int64_t> before;
+			for (CInstance* l : InstancesOf(lootObj)) before.insert(InstanceId(l));
+			RValue r;
+			std::vector<RValue> args = { RValue(100.0), RValue(100.0), RValue(false), RValue(100000.0), RValue(100000.0), RValue(false),
+				RValue(-1.0), RValue(false) };
+			g_Yytk->CallGameScriptEx(r, "gml_Script_scr_create_loot_equipment", h, h, args);
+			for (CInstance* l : InstancesOf(lootObj))
+			{
+				int64_t id = InstanceId(l);
+				if (before.count(id)) continue;
+				RValue ar = g_Yytk->CallBuiltin("variable_instance_get", { RValue(l), RValue("ar") });
+				RValue* head = ArrayAt(ar, 0);
+				RValue* slot = head ? ArrayAt(*head, 1) : nullptr;
+				bool match = slot && KindOf(*slot) == VALUE_STRING && slot->ToString() == d.Slot;
+				size_t line = SIZE_MAX;
+				for (size_t k = 1, n = ArrayLen(ar); k < n && match; ++k)
+					if (RValue* ln = ArrayAt(ar, k); ln && KindOf(*ln) == VALUE_ARRAY && ArrayAt(*ln, 0) && KindOf(*ArrayAt(*ln, 0)) == VALUE_STRING
+						&& ArrayAt(*ln, 0)->ToString() == "L") line = k;
+				if (!match || line == SIZE_MAX)
+				{
+					g_Yytk->CallBuiltin("instance_destroy", { RValue(l) });
+					continue;
+				}
+				RValue* ln = ArrayAt(ar, line);
+				*ArrayAt(*ln, 1) = RValue(static_cast<double>(d.Ref));
+				*ArrayAt(*ln, 2) = RValue(roll);
+				RValue name = g_Yytk->CallBuiltin("variable_instance_get", { RValue(l), RValue("loot_name") });
+				g_Yytk->CallBuiltin("variable_instance_set", { RValue(l), RValue("loot_name"), RStr(" " + d.Name + " ") });
+				g_Yytk->CallBuiltin("variable_instance_set", { RValue(l), RValue("baked"), RValue(false) });
+				(void)name;
+				return InstanceStub(l);
+			}
+		}
+		Fail("could not make a drop of that slot");
+	}
+}
+
+static bool CustomLegendary(int Ref, std::string& Name, std::string& Description)
+{
+	legend::Def* d = legend::ByRef(Ref);
+	if (!d) return false;
+	Name = d->Name;
+	Description = d->Description;
+	return true;
+}
+
+static Json CmdRegisterLegendary(const Json& Req) { return legend::Register(Req); }
+static Json CmdUnregisterLegendary(const Json& Req) { legend::Unregister(Req.GetStr("owner"), Req.GetStr("id")); return Json(true); }
+static Json CmdLegendaries() { return legend::List(); }
+static Json CmdLegendaryEquipped(const Json& Req)
+{
+	legend::Def& d = legend::Find(Req);
+	legend::ReadEquipped();
+	auto it = legend::Equipped.find(d.Ref);
+	return it != legend::Equipped.end() && d.Active ? Json(it->second) : Json();
+}
+static Json CmdLegendaryDrop(const Json& Req) { return legend::Drop(Req); }
+
+
 static Json Dispatch(const Json& Req);
 
 static Json SafeDispatch(const Json& Req)
@@ -3594,6 +4532,14 @@ static Json Dispatch(const Json& Req)
 	if (cmd == "skill_info") return CmdSkillInfo(Req);
 	if (cmd == "slot_info") return CmdSlotInfo(Req);
 	if (cmd == "stat_list") return CmdStatList();
+	if (cmd == "register_legendary") return CmdRegisterLegendary(Req);
+	if (cmd == "unregister_legendary") return CmdUnregisterLegendary(Req);
+	if (cmd == "legendaries") return CmdLegendaries();
+	if (cmd == "legendary_equipped") return CmdLegendaryEquipped(Req);
+	if (cmd == "legendary_drop") return CmdLegendaryDrop(Req);
+	if (cmd == "buff_add") return CmdBuffAdd(Req);
+	if (cmd == "buff_remove") return CmdBuffRemove(Req);
+	if (cmd == "buff_stacks") return CmdBuffStacks(Req);
 	if (cmd == "hero_stats") return CmdHeroStats();
 	if (cmd == "mod_data") return CmdModData(Req);
 	if (cmd == "mod_log") return CmdModLog(Req);
@@ -4037,6 +4983,35 @@ function S.stat_info(stat, slot, roll, level)
   return S.request{ cmd = "stat_info", stat = stat, slot = slot, roll = roll, level = level }
 end
 function S.hero_stats() return S.request{ cmd = "hero_stats" } end
+-- a custom legendary: data (as register_legendary) plus optional handlers on_hit(e, roll), on_kill, on_boss_kill,
+-- on_hero_hit, on_cast, on_status, on_damage, on_cooldown - called only while it is equipped (roll = its 75-100 roll)
+local legendary_events = { on_hit = "hit_dealt", on_kill = "enemy_killed", on_boss_kill = "boss_killed",
+  on_hero_hit = "hero_hit", on_cast = "skill_cast", on_status = "status_applied", on_damage = "damage_dealt",
+  on_cooldown = "cooldown_started" }
+function S.legendary(def)
+  local data, handlers = { cmd = "register_legendary" }, {}
+  for k, v in pairs(def) do
+    if type(v) == "function" then
+      if not legendary_events[k] then error("unknown legendary handler '" .. k .. "'", 2) end
+      handlers[k] = v
+    else
+      data[k] = v
+    end
+  end
+  local r = S.request(data)
+  for k, fn in pairs(handlers) do
+    S.on(legendary_events[k], function(e)
+      local roll = S.request{ cmd = "legendary_equipped", id = r.id }
+      if roll then fn(e, roll) end
+    end)
+  end
+  return r
+end
+function S.legendary_equipped(id) return S.request{ cmd = "legendary_equipped", id = id } end
+-- the game's buffs: S.buff{ key = "my_buff", stats = { attack_speed_percent = 20 }, duration = 4, max_stacks = 3, name = "..." }
+function S.buff(b) local r = { cmd = "buff_add" }; for k, v in pairs(b) do r[k] = v end; return S.request(r) end
+function S.buff_remove(key, target) return S.request{ cmd = "buff_remove", key = key, target = target } end
+function S.buff_stacks(key, target) return S.request{ cmd = "buff_stacks", key = key, target = target } end
 function S.stat_list() return S.request{ cmd = "stat_list" } end
 function S.load_data() return S.request{ cmd = "mod_data" } end
 function S.save_data(value) return S.request{ cmd = "mod_data", value = value } end
@@ -4089,7 +5064,7 @@ print = S.log
 			catch (const std::exception&) {}
 		}
 		M.Menus.clear();
-		try { CmdUnhook(owner); CmdUnsubscribe(owner); }
+		try { CmdUnhook(owner); CmdUnsubscribe(owner); legend::Unregister(M.Owner()); }
 		catch (const std::exception&) {}
 		if (!M.SettingsName.empty()) { g_Settings.erase(M.SettingsName); ++g_SettingsVer; M.SettingsName.clear(); }
 		M.Timers.clear();
@@ -4327,6 +5302,8 @@ static void CodeEventCallback(FWCodeEvent& Context)
 		{ PerfScope p(&g_PerfPartUs[0]); modspage::Tick(); }
 		try { PerfScope p(&g_PerfPartUs[1]); events::Tick(); }
 		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] events: %s", e.what()); }
+		try { legend::Tick(); }
+		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] legendaries: %s", e.what()); }
 		try { PerfScope p(&g_PerfPartUs[2]); lua::Tick(); }
 		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] lua: %s", e.what()); }
 	}

@@ -15,10 +15,13 @@ widgets, Lua mods, settings, data files, and the game facts you need to use them
   - [Settings](#settings): `register_settings` `settings` `set_setting`
   - [Data files](#data-files): `mod_data` `mod_log`
   - [Game knowledge](#game-knowledge): `item_info` `stat_info` `stat_list` `hero_stats` `slot_info` `legendary_info` `skill_info`
+  - [Legendaries](#legendaries): `register_legendary` `unregister_legendary` `legendaries` `legendary_equipped` `legendary_drop`
+  - [Buffs](#buffs): `buff_add` `buff_remove` `buff_stacks`
   - [Other](#other): `batch` `perf` `runner` `routines` `routine_index`
 - [Events](#events)
 - [Draw programs](#draw-programs)
 - [Widgets (UI kit)](#widgets-ui-kit)
+- [Custom legendaries](#custom-legendaries)
 - [Lua reference](#lua-reference)
 - [Items](#items)
 - [Game cheat sheet](#game-cheat-sheet)
@@ -478,6 +481,71 @@ and the lootable legendaries for that slot and hero, both sorted by name.
 #### `skill_info`
 `hero` *n* [current], `id` *n* → `{hero, id, name}`.
 
+### Legendaries
+
+New legendary items for the game - see [Custom legendaries](#custom-legendaries) for how they work.
+
+#### `register_legendary`
+| field | |
+|---|---|
+| `owner` *s* | your mod (with `id` it makes the permanent id `owner:id`; Lua: `lua:<file name>:id`) |
+| `id` *s* | keep it the same in every version: saved items find their legendary by it |
+| `name`, `description` *s* | the item's name and text; `@` in the text shows the next number of `stats` then `values` (scaled by the item's roll like the game's) |
+| `slot` *s* | `helm` `body` `shoulder` `bracer` `glove` `boot` `ring` `amulet` `belt` `cape` |
+| `hero` *n* [-1] | -1 every hero, 0 Knight, 1 Huntress, 2 Mage |
+| `lootable` *b* [true] | drops (and appears in reforging) like the game's legendaries |
+| `stats` *o* | `{stat: value}` while it is worn, scaled by its roll (75-100%); any key of `stat_list` except the two flat knockback ones |
+| `values` *a* | more numbers for `@` in the description (not stats) |
+| `icon` *n* | use the icon of one of the game's legendaries (its number) |
+| `effects` *a* | `[{trigger, chance, cooldown, seconds, status_key, scale_with_roll, buff, heal}]`, below |
+
+→ `{id, ref}` (`ref` = its number in the game's table for this session). Registering the same id again updates it
+(e.g. a Lua mod saved again).
+
+**Effects** (each runs only while the legendary is worn):
+- `trigger`: `hit` (every hero hit), `crit`, `ancestral`, `kill`, `boss_kill`, `hero_hit`, `cast` (a skill), `status`
+  (a status applied to an enemy; `status_key` to name one), `every` (each `seconds`).
+- `chance` *n* [100] in %, `cooldown` *n* [0] in seconds, `scale_with_roll` *b* [true].
+- `buff`: `{stats, duration (seconds), max_stacks, name, description, icon}` - a game buff on the hero (each trigger
+  adds a stack); with `icon` (one of the game's buff keys, e.g. `slow`, `fire_burn`) it shows in the buff bar.
+- `heal`: `{life, life_percent, mana, mana_percent, shield, shield_percent}` - restores the hero (`*_percent` of the
+  maximum life / mana; `shield` = Light Shield).
+
+#### `unregister_legendary`
+`owner`, `id` (none = all of the owner's) → `true`. Its row stays (items keep their number) but it no longer drops,
+gives stats or runs effects; its name shows "(mod off)". A Lua mod that is switched off or removed does this itself.
+
+#### `legendaries`
+→ `[{id, ref, name, slot, owner, active, equipped}]` (`equipped`: its roll while worn, else null).
+
+#### `legendary_equipped`
+`id` (or `owner` + `id`) → its roll (75-100) while it is worn, else null.
+
+#### `legendary_drop`
+`id`, `roll` [100] → a drop of that legendary at the hero (an equipment drop of its slot, made that legendary): for
+testing, or as a reward. → the `obj_loot` stub.
+
+### Buffs
+
+The game's own buffs: stats while they last, stacks, timers, and (with an icon) a place in the buff bar.
+
+#### `buff_add`
+| field | |
+|---|---|
+| `target` | a [root](#values-paths-and-roots); default the hero |
+| `key` *s* | your buff's name (no comma or pipe); the same key again adds stacks / refreshes it |
+| `stats` *o* | `{stat: value}` (`stat_list` keys) |
+| `duration` *n* [-1] | seconds; -1 = until removed |
+| `stacks` *n* [1], `max_stacks` *n* [1] | stacks to add, the most it can have |
+| `icon` *s* | one of the game's buff keys (`slow`, `fire_burn`, `ice_chill`, ...): its icon; then it shows in the buff bar |
+| `name`, `description` *s* | its tooltip in the buff bar (with `icon`) |
+| `debuff` *b* | shown as a debuff |
+
+→ its stacks now. Stats count in the target's stats like the game's own buffs.
+
+#### `buff_remove` / `buff_stacks`
+`target`, `key` → `true` / its stacks (0 = none).
+
 ### Other
 
 #### `batch`
@@ -595,6 +663,41 @@ state → call `ui_add` again with the new program (or `ui_refresh` if the progr
 
 ---
 
+## Custom legendaries
+
+A mod can add legendaries to the game. They are rows of the game's own legendary table, so they **drop** like the
+game's (and appear in Friedrich's reforging), show their name, icon and description, and count as worn like the
+game's own. Stats and effects come from SlormAPI:
+
+- **Stats** are a passive game buff on the hero while the legendary is worn, scaled by the item's legendary roll
+  (75-100%), like the game's stat legendaries.
+- **Effects** run on SlormAPI's events (hits, crits, kills, casts, statuses...) with the game's buffs and heals.
+- From Lua, `slorm.legendary{...}` also takes handlers (`on_hit`, `on_kill`, ...) for anything else.
+
+```lua
+slorm.legendary{
+  id = "windrunner", name = "Windrunner", slot = "boot", icon = 84,
+  description = "+@% Movement Speed. Critical strikes grant +@% Attack Speed for 3 seconds.",
+  stats = { the_speed_global_mult = 40 }, values = { 25 },
+  effects = { { trigger = "crit", cooldown = 0.5,
+                buff = { stats = { attack_speed_percent = 25 }, duration = 3, name = "Windrunner Haste", icon = "slow" } } },
+  on_kill = function(e, roll) ... end,               -- only while it is worn
+}
+```
+
+`examples/lua/legendary_windrunner.lua` is a complete one.
+
+**Saves.** A custom legendary never reaches a save file. When the game saves, each one is written as an **Epic** with
+the same stats, and SlormAPI notes which Epic it was (`mods/aurie/SlormAPI/data/legendary_items.json`); after loading,
+or when the legendary registers, the Epic becomes the legendary again. So:
+- removing the mod (or SlormAPI) leaves an ordinary Epic, never a broken item;
+- keep the `id` the same: the Epic finds its legendary by it;
+- a save copied to another PC (or Steam Cloud) has the Epic there; it becomes the legendary on a PC that has the
+  mod and its `legendary_items.json`.
+
+Custom legendaries cannot be placed in the game's legendary storage (it has one slot per game legendary); one that
+lands there is moved back to the bag.
+
 ## Lua reference
 
 Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helpers:
@@ -612,6 +715,9 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 | `slorm.null` | JSON null where Lua has no nil, e.g. "any" in patterns: `{ slorm.null, "abc*" }` |
 | `slorm.item_info(item)` / `slorm.slot_info(slot, hero?)` / `slorm.stat_info(stat, slot?, roll?, level?)` | game knowledge |
 | `slorm.hero_stats()` / `slorm.stat_list()` | the hero's final stats / every stat with its unit |
+| `slorm.legendary{...}` → `{id, ref}` | a custom legendary ([register_legendary](#register_legendary) fields) + handlers `on_hit`, `on_kill`, `on_boss_kill`, `on_hero_hit`, `on_cast`, `on_status`, `on_damage`, `on_cooldown` as `fn(event_data, roll)`, called only while it is worn |
+| `slorm.legendary_equipped(id)` | its roll while worn, else nil |
+| `slorm.buff{key, stats, duration, max_stacks, icon, name, ...}` / `slorm.buff_remove(key, target?)` / `slorm.buff_stacks(key, target?)` | the game's buffs ([buff_add](#buff_add)) |
 | `slorm.settings{ {key=..., ...}, ... }` → values / `slorm.setting(key)` | your settings (kept up to date) |
 | `slorm.save_data(table)` / `slorm.load_data()` | your data file |
 | `slorm.log_file(...)` | a line in your log file |
@@ -686,7 +792,7 @@ Version 1.0.2c. Names are the game's own.
 
 | | |
 |---|---|
-| `obj_ui_next_gen` | all menus: `menu_show` (`none`, `main`, `inventory`, `settings`, ...), `menu_citizen` (`blacksmith` = Friedrich's panel), `mba` (clickable elements), `rebake_menu` (set true to redraw), `main_panel` (0 Welcome, 1 New Game, 2 Load Game), `settings_panel` (0 Gameplay, 1 Settings, 2 Keybinds, 3 Codex) |
+| `obj_ui_next_gen` | all menus: `menu_show` (the open menu: `none`, `main`, `inventory`, `settings`, ...; **read it, don't write it** - set `menu_wanted` to open or close a menu: writing `menu_show` skips the game's menu switch and can crash it), `menu_citizen` (`blacksmith` = Friedrich's panel), `mba` (clickable elements), `rebake_menu` (set true to redraw), `main_panel` (0 Welcome, 1 New Game, 2 Load Game), `settings_panel` (0 Gameplay, 1 Settings, 2 Keybinds, 3 Codex) |
 | `obj_parent_hero` | the hero: `actual_state` (`"dead"`), `the_health`, `final_the_max_health`, `x`, `y` |
 | `obj_parent_enemy_NL` | enemies: `enemy_level`, `the_health`, `final_the_max_health` |
 | `obj_loot` | a drop: `ar` (the item), `loot_name` (its label; set `baked` false after changing it), `visible` |

@@ -85,6 +85,8 @@ Call `Request` on the game thread (from a YYToolkit callback). Every request is 
 | `stat_info` / `legendary_info` / `skill_info` | `stat` (+ `slot`, `roll`, `level`) / `id` / `hero`, `id` | names and data from the game's own files; `stat_info` with a `roll` also gives its `value` on an item of `level` (100) |
 | `slot_info` | `slot` (helm .. cape), `hero` | the gold (epic) stats that can roll on that slot and the hero's lootable legendaries for it, by name |
 | `stat_list` / `hero_stats` | – | every stat of the game with its unit / the hero's current final stats, life, mana and Light Shield |
+| `register_legendary` / `legendaries` / `legendary_equipped` / `legendary_drop` | see [Custom legendaries](#custom-legendaries) | new legendary items |
+| `buff_add` / `buff_remove` / `buff_stacks` | `target`, `key`, `stats`, `duration`, `max_stacks`, `icon`, `name` | the game's buffs: stats, stacks, timers, the buff bar |
 | `mod_data` | `mod`, `value` | saves one JSON value for your mod (up to 4 MB) / without `value`: returns it (null when none) |
 | `mod_log` | `mod`, `line` | appends a timestamped line to your mod's log file |
 | `register_settings` / `settings` / `set_setting` | `mod`, `settings` / `mod` / `mod`, `key`, `value` | mod settings (below) |
@@ -175,6 +177,7 @@ end)
 | `slorm.on_click(function(id, action) ... end)` | clicks on your widgets |
 | `slorm.item_info(item)` / `slorm.slot_info(slot, hero?)` / `slorm.stat_info(stat, slot?, roll?, level?)` | game knowledge (the commands above) |
 | `slorm.hero_stats()` / `slorm.stat_list()` | the hero's final stats / every stat with its unit |
+| `slorm.legendary{...}` / `slorm.buff{...}` | a custom legendary (with `on_hit`, `on_kill`, ... handlers) / a game buff |
 | `slorm.save_data(table)` / `slorm.load_data()` | keep your mod's own data between games (`mods/aurie/SlormAPI/data`) |
 | `slorm.log_file(...)` | a line in your mod's own log file (next to its data) |
 | `slorm.clock()` | seconds since the game started (for time budgets) |
@@ -221,6 +224,25 @@ tooltip, and their clicks come back as the `ui_clicked` event:
 Your program runs every time the game draws that menu, so values in it can come from game variables (`{"$global":
 ...}`) or from your own state: change it with `ui_add` again (or `ui_refresh` if it reads game variables). Widgets
 you stop drawing are removed, and `ui_remove` takes everything of yours out of that menu.
+
+## Custom legendaries
+Mods can add legendary items. They are rows of the game's own legendary table, so they drop like the game's
+legendaries, show their name, icon and description, and count as worn like the game's own; their stats (scaled by the
+item's roll) and effects - buffs and heals on hits, crits, kills, casts, statuses or a timer - come from SlormAPI:
+
+```lua
+slorm.legendary{
+  id = "windrunner", name = "Windrunner", slot = "boot", icon = 84,
+  description = "+@% Movement Speed. Critical strikes grant +@% Attack Speed for 3 seconds.",
+  stats = { the_speed_global_mult = 40 }, values = { 25 },
+  effects = { { trigger = "crit", cooldown = 0.5,
+                buff = { stats = { attack_speed_percent = 25 }, duration = 3, name = "Windrunner Haste", icon = "slow" } } },
+}
+```
+
+They never reach a save file: the game saves each one as an Epic with the same stats, which becomes the legendary again
+after loading. Removing the mod leaves an ordinary Epic. Details: [docs/API.md](docs/API.md#custom-legendaries);
+a complete example: `examples/lua/legendary_windrunner.lua`.
 
 ## Mod settings
 Describe your settings once (e.g. when your mod starts); SlormAPI shows them in Options > Mods, saves the values in
