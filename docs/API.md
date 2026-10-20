@@ -1,4 +1,4 @@
-# SlormAPI 1.0.1 — API reference
+# SlormAPI 1.0.2 — API reference
 
 Everything a mod can do through SlormAPI: every command with its fields and results, the events, draw programs and
 widgets, Lua mods, settings, data files, and the game facts you need to use them.
@@ -148,6 +148,24 @@ slorm.on("enemy_killed", function(e)
   slorm.ui("main", { slorm.text(1300, 120, "Kills: " .. kills, "ft_standard_16") })
 end)
 ```
+
+**As a pack (for Vortex).** A folder `mods/lua/<folder>/` with a `lua-pack.json` and the script runs too, when the
+manifest requires `slorm.slormapi`:
+
+```json
+{ "schema_version": 1, "type": "slorm-lua", "id": "my_mod", "name": "My Mod", "version": "1.0.0",
+  "entry": "my_mod.lua", "requires": { "slorm.slormapi": "1.0.2" } }
+```
+
+- `id` (lower case, `a-z 0-9 _ . -`) is the mod's name: its owner is `lua:<id>` and its data file `lua_<id>.json`.
+- `entry` is the script (default `main.lua`); only that file runs (no `require` of other files).
+- `requires["slorm.slormapi"]` is the minimum SlormAPI version; an older SlormAPI lists the pack with "Needs SlormAPI
+  x+" and does not run it. A pack without `slorm.slormapi` belongs to another Lua runtime and is ignored.
+- Switching it off renames `lua-pack.json` to `lua-pack.json.disabled`; a pack Vortex deployed is switched in Vortex.
+- A pack and a single file with the same name: the pack runs (the log says so).
+
+Zip it in the game-folder layout (`mods/lua/<id>/lua-pack.json`, `mods/lua/<id>/<entry>`): The Slormancer's Vortex
+extension installs it as a Lua pack (into `mods/Lua/<id>/`), and unzipping it into the game folder works too.
 
 See [Lua reference](#lua-reference) for every function and the sandbox rules. `examples/lua/kill_counter.lua` is a
 small complete mod; [BuildFilter](https://github.com/tsotsas/BuildFilter)'s `lua/BuildFilter.lua` is a big one

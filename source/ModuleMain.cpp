@@ -56,7 +56,7 @@ static double MicrosSinceStart()
 	return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - g_StartTime).count();
 }
 static constexpr uint16_t kDefaultPort = 47950;
-static constexpr const char* kVersion = "1.0.1";
+static constexpr const char* kVersion = "1.0.2";
 
 [[noreturn]] static void Fail(const std::string& Msg) { throw std::runtime_error(Msg); }
 
@@ -2118,7 +2118,17 @@ static Json CmdMods()
 		ModInfo m{ fs::path(file).stem().string(), FileVersion(f.path()), "", "", file };
 		bool loader = LoaderFile(file);
 		if (Lower(file) == "yytoolkit.dll") m.Author = "AurieFramework";
-		if (Lower(file) == "slormloader.dll") m.Name = "Slorm Loader";
+		if (Lower(file) == "slormloader.dll")
+		{
+			m.Name = "Slorm Loader";
+			if (m.Version.empty())                                   // no version resource: its runtime metadata has one
+			{
+				std::ifstream rt(GameDir() / "slorm-runtime.json", std::ios::binary);
+				std::stringstream ss;
+				ss << rt.rdbuf();
+				try { m.Version = sj::Parse(ss.str()).GetStr("version"); } catch (const std::exception&) {}
+			}
+		}
 		rows.push_back({ m, loader, GetModuleHandleW(fs::path(file).c_str()) != nullptr, !off });
 	}
 	// Aurie Core: mods/native/AurieCore.dll (patched game exe) or plugins/AurieCore.asi (Slorm Loader's version.dll)
@@ -5121,9 +5131,12 @@ namespace lua
 	struct Mod
 	{
 		std::string Stem, Name, Version, Author, Description;
-		fs::path Path;
+		fs::path Path;                       // the script: mods/lua/<stem>.lua, or a pack's entry file
+		std::string File;                    // what the Mods page switches: "<stem>.lua" or "<folder>/lua-pack.json"
+		std::string Need;                    // a pack that needs a newer SlormAPI: "Needs SlormAPI 1.2.0+"
+		std::string PackName, PackVersion;   // from lua-pack.json, shown until the script names itself
 		fs::file_time_type Time{};
-		bool Enabled = true, Tried = false;
+		bool Enabled = true, Tried = false, Pack = false;
 		lua_State* L = nullptr;
 		std::string Error;
 		std::vector<std::unique_ptr<Handler>> Handlers;
@@ -5539,7 +5552,7 @@ print = S.log
 		bool ok = luaL_loadbufferx(L, kPrelude, strlen(kPrelude), "=slorm", "t") == LUA_OK && PCall(M, 0);
 		if (ok)
 		{
-			std::string chunk = "@" + M.Stem + ".lua";
+			std::string chunk = "@" + (M.Pack ? M.Stem + "/" + M.Path.filename().string() : M.Stem + ".lua");
 			if (luaL_loadbufferx(L, src.data(), src.size(), chunk.c_str(), "t") != LUA_OK)   // text only: no bytecode
 			{
 				M.Error = lua_tostring(L, -1) ? lua_tostring(L, -1) : "cannot load";
@@ -5555,20 +5568,81 @@ print = S.log
 		++Version;
 	}
 
-	// mods/lua: new, changed, removed, switched on / off
+	struct Found { fs::path Path; bool On = true, Pack = false; std::string File, Need, Name, Version; };
+
+	// A Lua pack in the shared Vortex format: mods/lua/<folder>/lua-pack.json + its entry script. Only packs made for
+	// SlormAPI ("requires": {"slorm.slormapi": "<min version>"}) run here; packs for another Lua runtime are left alone.
+	bool ReadPack(const fs::path& Dir, Found& Out, std::string& Id)
+	{
+		fs::path man = Dir / "lua-pack.json", off = Dir / (std::string("lua-pack.json") + kOff);
+		bool on = Exists(man);
+		if (!on && !Exists(off)) return false;
+		std::error_code ec;
+		auto size = fs::file_size(on ? man : off, ec);
+		if (ec || size > 65536) return false;
+		std::ifstream f(on ? man : off, std::ios::binary);
+		std::stringstream ss;
+		ss << f.rdbuf();
+		Json j;
+		try { j = sj::Parse(ss.str()); } catch (const std::exception&) { return false; }
+		if (j.type != Json::Obj || j.GetStr("type") != "slorm-lua") return false;
+		const Json* req = j.Find("requires");
+		const Json* want = req && req->type == Json::Obj ? req->Find("slorm.slormapi") : nullptr;
+		if (!want) return false;                                       // made for another Lua runtime
+		Id = j.GetStr("id");
+		std::string entry = j.GetStr("entry", "main.lua");
+		if (Id.empty() || Id.size() > 64 || Id.find_first_of("/\\:") != std::string::npos || entry.empty()
+			|| entry.find(':') != std::string::npos || entry.find("..") != std::string::npos || entry[0] == '/' || entry[0] == '\\'
+			|| !Lower(entry).ends_with(".lua"))
+			return false;
+		Out = { Dir / fs::path(entry), on, true, Dir.filename().string() + "/lua-pack.json", "", j.GetStr("name"), j.GetStr("version") };
+		std::string min = want->type == Json::Str ? want->s : "";
+		if (!min.empty() && CompareVersions(kVersion, min) < 0) Out.Need = "Needs SlormAPI " + min + "+";
+		return true;
+	}
+
+	// mods/lua: new, changed, removed, switched on / off; single scripts and packs (one mod per name: a pack wins)
+	std::set<std::string> Shadowed;           // loose scripts already reported as hidden by a pack of the same name
 	void Scan()
 	{
 		fs::path dir = GameDir() / "mods" / "lua";
 		std::error_code ec;
 		fs::create_directories(dir, ec);
-		std::map<std::string, std::pair<fs::path, bool>> found;
+		std::map<std::string, Found> found;
+		std::map<std::string, std::string> byLower;                   // the same name in another case is the same mod
+		auto rank = [](const Found& F) { return (F.Pack ? 2 : 0) + (F.On ? 1 : 0); };
+		auto put = [&](const std::string& Stem, Found F)
+		{
+			std::string low = Lower(Stem);
+			if (auto it = byLower.find(low); it != byLower.end())
+			{
+				Found& old = found[it->second];
+				bool replace = rank(F) > rank(old);
+				const Found& hidden = replace ? old : F;
+				if (old.Pack != F.Pack && !hidden.Pack && Shadowed.insert(low).second)
+					DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] mods/lua/%s is also installed as a pack; the pack runs",
+						hidden.File.c_str());
+				if (!replace) return;
+				found.erase(it->second);
+			}
+			byLower[low] = Stem;
+			found[Stem] = std::move(F);
+		};
 		for (auto& f : fs::directory_iterator(dir, ec))
 		{
-			if (!f.is_regular_file()) continue;
+			std::error_code fe;
+			if (f.is_directory(fe))
+			{
+				Found p;
+				std::string id;
+				if (ReadPack(f.path(), p, id)) put(id, std::move(p));
+				continue;
+			}
+			if (!f.is_regular_file(fe)) continue;
 			std::string name = f.path().filename().string(), low = Lower(name);
-			if (low.ends_with(".lua")) found[name.substr(0, name.size() - 4)] = { f.path(), true };
-			else if (low.ends_with(".lua.disabled") && !found.count(name.substr(0, name.size() - 13)))
-				found[name.substr(0, name.size() - 13)] = { f.path(), false };
+			if (low.ends_with(".lua")) put(name.substr(0, name.size() - 4), { f.path(), true, false, name, "" });
+			else if (low.ends_with(".lua.disabled"))
+				put(name.substr(0, name.size() - 13), { f.path(), false, false, name.substr(0, name.size() - 9), "" });
 		}
 		for (size_t i = Mods.size(); i-- > 0;)
 			if (!found.count(Mods[i]->Stem)) { Unload(*Mods[i]); Mods.erase(Mods.begin() + static_cast<std::ptrdiff_t>(i)); }
@@ -5579,9 +5653,20 @@ print = S.log
 				if (x->Stem == stem) m = x.get();
 			if (!m) { Mods.push_back(std::make_unique<Mod>()); m = Mods.back().get(); m->Stem = stem; }
 			bool wasEnabled = m->Enabled;
-			m->Path = pe.first;
-			m->Enabled = pe.second;
+			m->Path = pe.Path;
+			m->Enabled = pe.On;
+			m->Pack = pe.Pack;
+			m->File = pe.File;
+			m->PackName = pe.Name;
+			m->PackVersion = pe.Version;
 			auto t = fs::last_write_time(m->Path, ec);
+			if (m->Need != pe.Need) { m->Need = pe.Need; m->Tried = false; ++Version; }
+			if (!m->Need.empty())                                     // waits for a newer SlormAPI
+			{
+				if (m->L) Unload(*m);
+				m->Time = t;
+				continue;
+			}
 			if (!m->Enabled)
 			{
 				if (m->L) Unload(*m);
@@ -5634,11 +5719,11 @@ static void LuaModRows(Json& Out)
 	{
 		const lua::Mod& m = *mp;
 		Json j = Json::Object();
-		j.Add("name", m.Display());
-		j.Add("version", m.Version);
+		j.Add("name", m.Name.empty() && !m.PackName.empty() ? m.PackName : m.Display());
+		j.Add("version", m.Version.empty() ? m.PackVersion : m.Version);
 		j.Add("author", m.Author);
 		j.Add("description", m.Description.empty() ? "Lua script" : m.Description);
-		j.Add("file", m.Stem + ".lua");
+		j.Add("file", m.File.empty() ? m.Stem + ".lua" : m.File);
 		j.Add("kind", "lua");
 		j.Add("loaded", m.L != nullptr);
 		j.Add("enabled", m.Enabled);
@@ -5647,7 +5732,8 @@ static void LuaModRows(Json& Out)
 		if (managed) { j.Add("managed", true); j.Add("note", "Switched on / off in Vortex"); }
 		j.Add("pending", false);
 		Json problems = Json::Array();
-		if (!m.Error.empty()) problems.Push(Json("Lua error: " + m.Error));
+		if (!m.Need.empty()) problems.Push(Json(m.Need));
+		else if (!m.Error.empty()) problems.Push(Json("Lua error: " + m.Error));
 		j.Add("problems", std::move(problems));
 		rows.push_back(std::move(j));
 	}
@@ -5656,8 +5742,16 @@ static void LuaModRows(Json& Out)
 
 static bool LuaToggle(const std::string& File, bool On)
 {
-	if (!Lower(File).ends_with(".lua") || File.find_first_of("/\\:") != std::string::npos) return false;
-	fs::path dir = GameDir() / "mods" / "lua", on = dir / File, off = dir / (File + kOff);
+	fs::path dir = GameDir() / "mods" / "lua", on, off;
+	if (Lower(File).ends_with("/lua-pack.json"))                  // a pack: its manifest is switched
+	{
+		std::string folder = File.substr(0, File.size() - 14);
+		if (folder.empty() || folder == "." || folder == ".." || folder.find_first_of("/\\:") != std::string::npos) return false;
+		on = dir / folder / "lua-pack.json";
+		off = dir / folder / (std::string("lua-pack.json") + kOff);
+	}
+	else if (Lower(File).ends_with(".lua") && File.find_first_of("/\\:") == std::string::npos) { on = dir / File; off = dir / (File + kOff); }
+	else return false;
 	if (HardLinked(on)) Fail(File + " is managed by Vortex: switch it on / off there");
 	std::error_code ec;
 	if (On && !Exists(on) && Exists(off)) fs::rename(off, on, ec);

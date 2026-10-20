@@ -1,4 +1,4 @@
-# SlormAPI 1.0.1 — a modding API for The Slormancer
+# SlormAPI 1.0.2 — a modding API for The Slormancer
 
 ![SlormAPI](docs/banner.png)
 
@@ -31,18 +31,18 @@ loot filter made twice - in C++ and in Lua - with the same features.
   loads Aurie mods another way works as it is.
 
 ## Install
-Easiest: **`SlormAPI-Installer-1.0.1.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
+Easiest: **`SlormAPI-Installer-1.0.2.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
 it, close the game, double-click `Install.bat` and choose 1. It installs the Aurie loader (the official Aurie Core
 2.0.2 + YYToolkit 5.0.0c, checked against their release checksums) and SlormAPI, and can repair the loader after a
 game update or remove everything. When the game already loads Aurie through another mod loader (a `version.dll`
 loader), it keeps that loader and adds only the mod.
 
-Manually (`SlormAPI-1.0.1.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
+Manually (`SlormAPI-1.0.2.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
 1. Have Aurie + YYToolkit for The Slormancer (https://github.com/AurieFramework/Aurie,
    https://github.com/AurieFramework/YYToolkit), or a game where Aurie mods already load.
 2. Unzip it into `<The Slormancer folder>`.
 
-With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-1.0.1.zip` in
+With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-1.0.2.zip` in
 Vortex like any other mod (it goes to `mods/Aurie`). Don't use the installer then. If you used it before, run it once
 more and choose 4: the Vortex loader setup needs the original game exe back. Mods that Vortex deployed show "Switched
 on / off in Vortex" on the Mods page.
@@ -161,6 +161,17 @@ script hook install it only while someone listens.
 A Lua mod is one text file: put `my_mod.lua` into `<The Slormancer>\mods\lua\` (SlormAPI creates the folder). It loads
 while the game runs, reloads every time you save the file, and shows on the Mods page, where it switches on and off
 right away. `examples/lua/kill_counter.lua` is a complete one (kills in the pause menu, a Reset button, a setting).
+
+To publish one for **Vortex**, zip it as a pack: `mods/lua/my_mod/lua-pack.json` next to `mods/lua/my_mod/my_mod.lua`.
+Vortex installs it automatically (into `mods/Lua/my_mod/`) and SlormAPI runs it from there:
+
+```json
+{ "schema_version": 1, "type": "slorm-lua", "id": "my_mod", "name": "My Mod", "version": "1.0.0",
+  "entry": "my_mod.lua", "requires": { "slorm.slormapi": "1.0.2" } }
+```
+
+`"slorm.slormapi"` is what marks it as a SlormAPI mod (the minimum SlormAPI version); packs without it are left alone.
+Its name on the Mods page and in your data files is the `id`.
 
 ```lua
 slorm.mod{ name = "Kill Counter", version = "1.0", author = "me", description = "Counts your kills" }
