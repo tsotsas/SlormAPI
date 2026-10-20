@@ -173,6 +173,9 @@ Vortex installs it automatically (into `mods/Lua/my_mod/`) and SlormAPI runs it 
 `"slorm.slormapi"` is what marks it as a SlormAPI mod (the minimum SlormAPI version); packs without it are left alone.
 Its name on the Mods page and in your data files is the `id`.
 
+**Starting a new one:** copy `examples/lua_pack/` - a pack ready to rename, with `pack.cmd`, which checks
+`lua-pack.json` and makes the zip for Nexus / Vortex.
+
 ```lua
 slorm.mod{ name = "Kill Counter", version = "1.0", author = "me", description = "Counts your kills" }
 local kills = 0

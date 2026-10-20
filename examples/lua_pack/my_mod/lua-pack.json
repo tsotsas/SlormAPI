@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "type": "slorm-lua",
+  "id": "my_mod",
+  "name": "My Mod",
+  "version": "1.0.0",
+  "author": "you",
+  "description": "What your mod does, in one line.",
+  "entry": "main.lua",
+  "requires": { "slorm.slormapi": "1.0.2" }
+}

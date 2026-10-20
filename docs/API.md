@@ -163,9 +163,13 @@ manifest requires `slorm.slormapi`:
   x+" and does not run it. A pack without `slorm.slormapi` belongs to another Lua runtime and is ignored.
 - Switching it off renames `lua-pack.json` to `lua-pack.json.disabled`; a pack Vortex deployed is switched in Vortex.
 - A pack and a single file with the same name: the pack runs (the log says so).
+- Vortex installs only manifests with versions as `x.y.z` and no other fields than these, `author`, `description`,
+  `$schema` and `minimum_runtime`.
 
 Zip it in the game-folder layout (`mods/lua/<id>/lua-pack.json`, `mods/lua/<id>/<entry>`): The Slormancer's Vortex
 extension installs it as a Lua pack (into `mods/Lua/<id>/`), and unzipping it into the game folder works too.
+`examples/lua_pack/` is a pack to start from; its `pack.cmd` checks `lua-pack.json` by the extension's rules and
+makes that zip.
 
 See [Lua reference](#lua-reference) for every function and the sandbox rules. `examples/lua/kill_counter.lua` is a
 small complete mod; [BuildFilter](https://github.com/tsotsas/BuildFilter)'s `lua/BuildFilter.lua` is a big one
