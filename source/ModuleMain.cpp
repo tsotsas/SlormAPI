@@ -56,7 +56,7 @@ static double MicrosSinceStart()
 	return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - g_StartTime).count();
 }
 static constexpr uint16_t kDefaultPort = 47950;
-static constexpr const char* kVersion = "1.0.2";
+static constexpr const char* kVersion = "1.0.3";
 
 [[noreturn]] static void Fail(const std::string& Msg) { throw std::runtime_error(Msg); }
 
@@ -5160,7 +5160,7 @@ namespace lua
 		fs::path Path;                       // the script: mods/lua/<stem>.lua, or a pack's entry file
 		std::string File;                    // what the Mods page switches: "<stem>.lua" or "<folder>/lua-pack.json"
 		std::string Need;                    // a pack that needs a newer SlormAPI: "Needs SlormAPI 1.2.0+"
-		std::string PackName, PackVersion;   // from lua-pack.json, shown until the script names itself
+		std::string PackName, PackVersion, PackAuthor, PackDescription;   // from lua-pack.json, where slorm.mod{} says nothing
 		fs::file_time_type Time{};
 		bool Enabled = true, Tried = false, Pack = false;
 		lua_State* L = nullptr;
@@ -5173,7 +5173,8 @@ namespace lua
 		double CallStart = 0;
 		size_t MemUsed = 0;
 		std::string Owner() const { return "lua:" + Stem; }
-		std::string Display() const { return Name.empty() ? Stem : Name; }
+		// its name on the Mods page, in settings and in slorm.display_name(): slorm.mod{name}, else the pack's name
+		std::string Display() const { return !Name.empty() ? Name : !PackName.empty() ? PackName : Stem; }
 	};
 	std::vector<std::unique_ptr<Mod>> Mods;
 	double ScanAt = 0;
@@ -5594,7 +5595,7 @@ print = S.log
 		++Version;
 	}
 
-	struct Found { fs::path Path; bool On = true, Pack = false; std::string File, Need, Name, Version; };
+	struct Found { fs::path Path; bool On = true, Pack = false; std::string File, Need, Name, Version, Author, Description; };
 
 	// A Lua pack in the shared Vortex format: mods/lua/<folder>/lua-pack.json + its entry script. Only packs made for
 	// SlormAPI ("requires": {"slorm.slormapi": "<min version>"}) run here; packs for another Lua runtime are left alone.
@@ -5621,7 +5622,8 @@ print = S.log
 			|| entry.find(':') != std::string::npos || entry.find("..") != std::string::npos || entry[0] == '/' || entry[0] == '\\'
 			|| !Lower(entry).ends_with(".lua"))
 			return false;
-		Out = { Dir / fs::path(entry), on, true, Dir.filename().string() + "/lua-pack.json", "", j.GetStr("name"), j.GetStr("version") };
+		Out = { Dir / fs::path(entry), on, true, Dir.filename().string() + "/lua-pack.json", "", j.GetStr("name"), j.GetStr("version"),
+			j.GetStr("author"), j.GetStr("description") };
 		std::string min = want->type == Json::Str ? want->s : "";
 		if (!min.empty() && CompareVersions(kVersion, min) < 0) Out.Need = "Needs SlormAPI " + min + "+";
 		return true;
@@ -5685,6 +5687,8 @@ print = S.log
 			m->File = pe.File;
 			m->PackName = pe.Name;
 			m->PackVersion = pe.Version;
+			m->PackAuthor = pe.Author;
+			m->PackDescription = pe.Description;
 			auto t = fs::last_write_time(m->Path, ec);
 			if (m->Need != pe.Need) { m->Need = pe.Need; m->Tried = false; ++Version; }
 			if (!m->Need.empty())                                     // waits for a newer SlormAPI
@@ -5745,10 +5749,10 @@ static void LuaModRows(Json& Out)
 	{
 		const lua::Mod& m = *mp;
 		Json j = Json::Object();
-		j.Add("name", m.Name.empty() && !m.PackName.empty() ? m.PackName : m.Display());
+		j.Add("name", m.Display());
 		j.Add("version", m.Version.empty() ? m.PackVersion : m.Version);
-		j.Add("author", m.Author);
-		j.Add("description", m.Description.empty() ? "Lua script" : m.Description);
+		j.Add("author", m.Author.empty() ? m.PackAuthor : m.Author);
+		j.Add("description", !m.Description.empty() ? m.Description : !m.PackDescription.empty() ? m.PackDescription : "Lua script");
 		j.Add("file", m.File.empty() ? m.Stem + ".lua" : m.File);
 		j.Add("kind", "lua");
 		j.Add("loaded", m.L != nullptr);

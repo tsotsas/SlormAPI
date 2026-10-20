@@ -21,7 +21,7 @@ param(
     [switch]$Yes
 )
 $ErrorActionPreference = 'Stop'
-$Version = '1.0.2'
+$Version = '1.0.3'
 $AppId = '1104280'
 $ExeName = 'The Slormancer.exe'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path

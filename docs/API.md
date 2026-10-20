@@ -1,4 +1,4 @@
-# SlormAPI 1.0.2 — API reference
+# SlormAPI 1.0.3 — API reference
 
 Everything a mod can do through SlormAPI: every command with its fields and results, the events, draw programs and
 widgets, Lua mods, settings, data files, and the game facts you need to use them.
@@ -157,7 +157,9 @@ manifest requires `slorm.slormapi`:
   "entry": "my_mod.lua", "requires": { "slorm.slormapi": "1.0.2" } }
 ```
 
-- `id` (lower case, `a-z 0-9 _ . -`) is the mod's name: its owner is `lua:<id>` and its data file `lua_<id>.json`.
+- `id` (lower case, `a-z 0-9 _ . -`) names its files: its owner is `lua:<id>` and its data file `lua_<id>.json`.
+- `name`, `author` and `description` are its row on the Mods page; `name` is also the name its settings are kept
+  under and what `slorm.display_name()` returns. The script does not need `slorm.mod{}` (1.0.3+); what that sets wins.
 - `entry` is the script (default `main.lua`); only that file runs (no `require` of other files).
 - `requires["slorm.slormapi"]` is the minimum SlormAPI version; an older SlormAPI lists the pack with "Needs SlormAPI
   x+" and does not run it. A pack without `slorm.slormapi` belongs to another Lua runtime and is ignored.
@@ -741,7 +743,7 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 
 | function | does |
 |---|---|
-| `slorm.mod{name, version, author, description}` | your row on the Mods page (call it first) |
+| `slorm.mod{name, version, author, description}` | your row on the Mods page (call it first; in a pack optional: `lua-pack.json` fills in what it leaves out) |
 | `slorm.request{cmd = ..., ...}` | any command above → its `result` (an error raises a Lua error) |
 | `slorm.on(event, fn)` → id / `slorm.off(id)` | events: `fn(data, event)` |
 | `slorm.every(seconds, fn)` / `slorm.after(seconds, fn)` → id / `slorm.cancel(id)` | timers (at most once per frame and every 10 ms; `every(0, fn)` = about every frame) |
