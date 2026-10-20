@@ -1,4 +1,4 @@
-# SlormAPI 1.0.0 — a modding API for The Slormancer
+# SlormAPI 1.0.1 — a modding API for The Slormancer
 
 ![SlormAPI](docs/banner.png)
 
@@ -31,16 +31,21 @@ loot filter made twice - in C++ and in Lua - with the same features.
   loads Aurie mods another way works as it is.
 
 ## Install
-Easiest: **`SlormAPI-Installer-1.0.0.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
+Easiest: **`SlormAPI-Installer-1.0.1.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
 it, close the game, double-click `Install.bat` and choose 1. It installs the Aurie loader (the official Aurie Core
 2.0.2 + YYToolkit 5.0.0c, checked against their release checksums) and SlormAPI, and can repair the loader after a
 game update or remove everything. When the game already loads Aurie through another mod loader (a `version.dll`
 loader), it keeps that loader and adds only the mod.
 
-Manually (`SlormAPI-1.0.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
+Manually (`SlormAPI-1.0.1.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
 1. Have Aurie + YYToolkit for The Slormancer (https://github.com/AurieFramework/Aurie,
    https://github.com/AurieFramework/YYToolkit), or a game where Aurie mods already load.
 2. Unzip it into `<The Slormancer folder>`.
+
+With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-1.0.1.zip` in
+Vortex like any other mod (it goes to `mods/Aurie`). Don't use the installer then. If you used it before, run it once
+more and choose 4: the Vortex loader setup needs the original game exe back. Mods that Vortex deployed show "Switched
+on / off in Vortex" on the Mods page.
 
 Uninstall: delete `SlormAPI.dll` (or installer > 4). SlormAPI never writes your save files.
 

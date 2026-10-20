@@ -1,4 +1,4 @@
-# SlormAPI 1.0.0 — API reference
+# SlormAPI 1.0.1 — API reference
 
 Everything a mod can do through SlormAPI: every command with its fields and results, the events, draw programs and
 widgets, Lua mods, settings, data files, and the game facts you need to use them.

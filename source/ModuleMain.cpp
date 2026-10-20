@@ -56,7 +56,7 @@ static double MicrosSinceStart()
 	return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - g_StartTime).count();
 }
 static constexpr uint16_t kDefaultPort = 47950;
-static constexpr const char* kVersion = "1.0.0";
+static constexpr const char* kVersion = "1.0.1";
 
 [[noreturn]] static void Fail(const std::string& Msg) { throw std::runtime_error(Msg); }
 
