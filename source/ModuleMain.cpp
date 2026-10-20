@@ -508,6 +508,7 @@ struct EvalCtx
 	int ArgCount;
 	RValue** Args;
 	std::map<std::string, RValue> Vals;
+	double Scale = 0;   // self.ui_scale once read (UiScale)
 };
 
 static Expr CompileExpr(const Json& J)
@@ -695,25 +696,41 @@ static void MbaPushEntry(CInstance* Self, RValue Entry);   // below RunProgram's
 
 static RValue RStr(const std::string& S) { return RValue(std::string_view(S)); }
 
+// The game lays its menus out for 1920x1080 and multiplies every position and size by self.ui_scale (the resolution)
+// when it draws; widgets take layout coordinates and do the same.
+static double UiScale(EvalCtx& C)
+{
+	if (C.Scale <= 0)
+	{
+		double s = Num(SelfVar(C.Self, "ui_scale"));
+		C.Scale = s > 0 ? s : 1.0;
+	}
+	return C.Scale;
+}
+
 static void WidgetText(EvalCtx& C, double X, double Y, const std::string& S, const std::string& Font, const std::string& Color,
 	double Ha = 0, double Va = 1)
 {
-	std::vector<RValue> a = { RValue(X), RValue(Y), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(Ha), RValue(Va),
+	double s = UiScale(C);   // scr_draw_text sizes the font itself
+	std::vector<RValue> a = { RValue(X * s), RValue(Y * s), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(Ha), RValue(Va),
 		RValue(0.0), RValue(1.0), RStr(Color), RStr("black"), RValue(1.0), RValue(false) };
 	CallFn("gml_Script_scr_draw_text", true, a, C);
 }
 
 static void WidgetSprite(EvalCtx& C, const RValue& Spr, double Frame, double X, double Y)
 {
-	std::vector<RValue> a = { Spr, RValue(Frame), RValue(X), RValue(Y) };
-	CallFn("draw_sprite", false, a, C);
+	double s = UiScale(C);
+	std::vector<RValue> a = { Spr, RValue(Frame), RValue(X * s), RValue(Y * s), RValue(s), RValue(s), RValue(0.0),
+		RValue(static_cast<double>(0xFFFFFF)), RValue(1.0) };
+	CallFn("draw_sprite_ext", false, a, C);
 }
 
 static void WidgetRect(EvalCtx& C, double X1, double Y1, double X2, double Y2, double Color)
 {
 	std::vector<RValue> c = { RValue(Color) };
 	CallFn("draw_set_color", false, c, C);
-	std::vector<RValue> r = { RValue(X1), RValue(Y1), RValue(X2), RValue(Y2), RValue(false) };
+	double s = UiScale(C);
+	std::vector<RValue> r = { RValue(X1 * s), RValue(Y1 * s), RValue(X2 * s), RValue(Y2 * s), RValue(false) };
 	CallFn("draw_rectangle", false, r, C);
 	std::vector<RValue> w = { RValue(static_cast<double>(0xFFFFFF)) };
 	CallFn("draw_set_color", false, w, C);
@@ -723,8 +740,9 @@ static void WidgetRect(EvalCtx& C, double X1, double Y1, double X2, double Y2, d
 static void WidgetEntry(EvalCtx& C, const std::string& Owner, const std::string& Id, const std::string& Action, const RValue& Spr,
 	double X, double Y, double W, double H, const RValue& Text, const RValue& Tooltip)
 {
+	double s = UiScale(C);
 	RValue e = g_Yytk->CallBuiltin("array_create", { RValue(10.0), RValue(0.0) });
-	RValue fields[10] = { RStr("ui_" + Id), Spr, RValue(X), RValue(Y), RValue(W), RValue(H), Text,
+	RValue fields[10] = { RStr("ui_" + Id), Spr, RValue(X * s), RValue(Y * s), RValue(W * s), RValue(H * s), Text,
 		AssetIndex("scr_blacksmith_open_filter_from_inventory"), RStr("slormapi:ui:" + Owner + "|" + Id + "|" + Action), Tooltip };
 	for (int k = 0; k < 10; ++k) g_Yytk->CallBuiltin("array_set", { e, RValue(static_cast<double>(k)), fields[k] });
 	MbaPushEntry(C.Self, e);
