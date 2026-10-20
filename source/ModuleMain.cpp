@@ -2628,7 +2628,7 @@ namespace modspage
 	Json Finish(Json Calls, const Json& When)
 	{
 		Json all = Json::Array();
-		for (const char* name : { "ModsPage", "ModsToggle", "LegendaryPrompt" }) all.Push(Call("$mba_remove", A({ 0, name })));
+		for (const char* name : { "Mods", "ModsPage", "ModsToggle", "LegendaryPrompt" }) all.Push(Call("$mba_remove", A({ 0, name })));
 		for (auto& c : Calls.a)
 		{
 			Json x = c;
@@ -4386,9 +4386,11 @@ namespace legend
 		if (WarnTick > 0) WarnLeft -= (std::min)(0.25, now - WarnTick);
 		WarnTick = now;
 		Confirmed = true;                                          // seen: CONTINUE in the pause menu does not ask again
+		double sc = Num(g_Yytk->CallBuiltin("variable_instance_get", { RValue(Self), RValue("ui_scale") }));
+		if (sc <= 0) sc = 1;                                       // the 1920x1080 layout times the game's ui_scale
 		auto text = [&](double X, double Y, const std::string& S, const char* Font, const char* Color)
 		{
-			std::vector<RValue> a = { RValue(X), RValue(Y), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(1.0), RValue(1.0),
+			std::vector<RValue> a = { RValue(X * sc), RValue(Y * sc), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(1.0), RValue(1.0),
 				RValue(0.0), RValue(1.0), RStr(Color), RStr("black"), RValue(1.0), RValue(false) };
 			RValue r;
 			g_Yytk->CallGameScriptEx(r, "gml_Script_scr_draw_text", Self, Self, a);
@@ -4397,9 +4399,9 @@ namespace legend
 		RValue oldAlpha = g_Yytk->CallBuiltin("draw_get_alpha", {}), oldColor = g_Yytk->CallBuiltin("draw_get_color", {});
 		g_Yytk->CallBuiltin("draw_set_alpha", { RValue(0.88 * alpha) });
 		g_Yytk->CallBuiltin("draw_set_color", { RValue(static_cast<double>(0x0a0a0a)) });
-		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380.0), RValue(130.0), RValue(1540.0), RValue(262.0), RValue(false) });
+		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380 * sc), RValue(130 * sc), RValue(1540 * sc), RValue(262 * sc), RValue(false) });
 		g_Yytk->CallBuiltin("draw_set_color", { RValue(static_cast<double>(0x2a5ad0)) });       // the game's orange (BGR)
-		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380.0), RValue(130.0), RValue(1540.0), RValue(262.0), RValue(true) });
+		g_Yytk->CallBuiltin("draw_rectangle", { RValue(380 * sc), RValue(130 * sc), RValue(1540 * sc), RValue(262 * sc), RValue(true) });
 		g_Yytk->CallBuiltin("draw_set_alpha", { RValue(alpha) });
 		size_t n = WaitingList.size();
 		text(960, 160, std::to_string(n) + (n == 1 ? " custom legendary is" : " custom legendaries are") + " waiting for a mod that is not loaded",
