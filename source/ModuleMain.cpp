@@ -510,6 +510,7 @@ struct EvalCtx
 	int ArgCount;
 	RValue** Args;
 	std::map<std::string, RValue> Vals;
+	double Scale = 0;   // self.ui_scale once read (UiScale)
 };
 
 static Expr CompileExpr(const Json& J)
@@ -697,25 +698,41 @@ static void MbaPushEntry(CInstance* Self, RValue Entry);   // below RunProgram's
 
 static RValue RStr(const std::string& S) { return RValue(std::string_view(S)); }
 
+// The game lays its menus out for 1920x1080 and multiplies every position and size by self.ui_scale (the resolution)
+// when it draws; widgets take layout coordinates and do the same.
+static double UiScale(EvalCtx& C)
+{
+	if (C.Scale <= 0)
+	{
+		double s = Num(SelfVar(C.Self, "ui_scale"));
+		C.Scale = s > 0 ? s : 1.0;
+	}
+	return C.Scale;
+}
+
 static void WidgetText(EvalCtx& C, double X, double Y, const std::string& S, const std::string& Font, const std::string& Color,
 	double Ha = 0, double Va = 1)
 {
-	std::vector<RValue> a = { RValue(X), RValue(Y), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(Ha), RValue(Va),
+	double s = UiScale(C);   // scr_draw_text sizes the font itself
+	std::vector<RValue> a = { RValue(X * s), RValue(Y * s), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(Ha), RValue(Va),
 		RValue(0.0), RValue(1.0), RStr(Color), RStr("black"), RValue(1.0), RValue(false) };
 	CallFn("gml_Script_scr_draw_text", true, a, C);
 }
 
 static void WidgetSprite(EvalCtx& C, const RValue& Spr, double Frame, double X, double Y)
 {
-	std::vector<RValue> a = { Spr, RValue(Frame), RValue(X), RValue(Y) };
-	CallFn("draw_sprite", false, a, C);
+	double s = UiScale(C);
+	std::vector<RValue> a = { Spr, RValue(Frame), RValue(X * s), RValue(Y * s), RValue(s), RValue(s), RValue(0.0),
+		RValue(static_cast<double>(0xFFFFFF)), RValue(1.0) };
+	CallFn("draw_sprite_ext", false, a, C);
 }
 
 static void WidgetRect(EvalCtx& C, double X1, double Y1, double X2, double Y2, double Color)
 {
 	std::vector<RValue> c = { RValue(Color) };
 	CallFn("draw_set_color", false, c, C);
-	std::vector<RValue> r = { RValue(X1), RValue(Y1), RValue(X2), RValue(Y2), RValue(false) };
+	double s = UiScale(C);
+	std::vector<RValue> r = { RValue(X1 * s), RValue(Y1 * s), RValue(X2 * s), RValue(Y2 * s), RValue(false) };
 	CallFn("draw_rectangle", false, r, C);
 	std::vector<RValue> w = { RValue(static_cast<double>(0xFFFFFF)) };
 	CallFn("draw_set_color", false, w, C);
@@ -725,8 +742,9 @@ static void WidgetRect(EvalCtx& C, double X1, double Y1, double X2, double Y2, d
 static void WidgetEntry(EvalCtx& C, const std::string& Owner, const std::string& Id, const std::string& Action, const RValue& Spr,
 	double X, double Y, double W, double H, const RValue& Text, const RValue& Tooltip)
 {
+	double s = UiScale(C);
 	RValue e = g_Yytk->CallBuiltin("array_create", { RValue(10.0), RValue(0.0) });
-	RValue fields[10] = { RStr("ui_" + Id), Spr, RValue(X), RValue(Y), RValue(W), RValue(H), Text,
+	RValue fields[10] = { RStr("ui_" + Id), Spr, RValue(X * s), RValue(Y * s), RValue(W * s), RValue(H * s), Text,
 		AssetIndex("scr_blacksmith_open_filter_from_inventory"), RStr("slormapi:ui:" + Owner + "|" + Id + "|" + Action), Tooltip };
 	for (int k = 0; k < 10; ++k) g_Yytk->CallBuiltin("array_set", { e, RValue(static_cast<double>(k)), fields[k] });
 	MbaPushEntry(C.Self, e);
@@ -2578,10 +2596,22 @@ namespace modspage
 	}
 	Json Asset(const char* Name) { return O({ { "$asset", Name } }); }
 	Json Call(const char* Fn, Json Args) { return O({ { "fn", Fn }, { "args", std::move(Args) } }); }
+	// the layout is the game's 1920x1080 one; the game multiplies positions and sizes by self.ui_scale when it draws
+	Json Scale() { return O({ { "$self", "ui_scale" } }); }
+	Json U(Json X) { return O({ { "$op", "*" }, { "args", A({ std::move(X), Scale() }) } }); }
+	Json Sprite(const char* Spr, Json X, Json Y)
+	{
+		return Call("draw_sprite_ext", A({ Asset(Spr), 0, U(std::move(X)), U(std::move(Y)), Scale(), Scale(), 0, 16777215, 1 }));
+	}
+	Json Entry(const char* Name, const char* Spr, Json X, Json Y, Json W, Json H, Json Text, const std::string& Action)
+	{
+		return Call("$mba_push", A({ A({ Name, Asset(Spr), U(std::move(X)), U(std::move(Y)), U(std::move(W)), U(std::move(H)),
+			std::move(Text), Asset(kSink), "slormapi:" + Action }) }));
+	}
 	// the game's text script (fonts by name); drawn right away with these flags (the main menu's own 1, 0 defers it)
 	Json Text(double X, double Y, const std::string& S, const char* Font, const char* Color, int Ha = 0)
 	{
-		return Call("scr_draw_text", A({ X, Y, S, 1, 1, Font, Ha, 1, 0, 1, Color, "black", 1, false }));
+		return Call("scr_draw_text", A({ U(X), U(Y), S, 1, 1, Font, Ha, 1, 0, 1, Color, "black", 1, false }));
 	}
 	Json Label(double X, double Y, const std::string& S) { return Text(X, Y, S, "ft_standard_12", "white", 1); }
 	std::string Clip(std::string S, size_t N) { return S.size() <= N ? S : S.substr(0, N - 3) + "..."; }
@@ -2613,13 +2643,12 @@ namespace modspage
 		auto entry = [](const char* Name, const char* Spr, double X, double Y, double W, double H, const char* Text,
 			const std::string& Action)
 		{
-			return Call("$mba_push", A({ A({ Name, Asset(Spr), X, Y, W, H, Text, Asset(kSink), "slormapi:" + Action }) }));
+			return Entry(Name, Spr, X, Y, W, H, Text, Action);
 		};
-		auto sprite = [](const char* Spr, double X, double Y) { return Call("draw_sprite", A({ Asset(Spr), 0, X, Y })); };
 		// only on the Welcome panel (main_panel 0; New Game / Load Game use the same box and hide DISCORD)
 		Json welcome = O({ { "$op", "==" }, { "args", A({ O({ { "$op", "??" }, { "args", A({ O({ { "$self", "main_panel" } }), 0 }) } }), 0 }) } });
 		Json calls = Json::Array();
-		calls.Push(Call("draw_sprite", A({ Asset("spr_menu_thin_blue_button"), 0, kBtnX, kBtnY })));
+		calls.Push(Sprite("spr_menu_thin_blue_button", kBtnX, kBtnY));
 		calls.Push(Label(kBtnX + 168, kBtnY + 26, g_LastSession.GetBool("crashed", false) && !CrashSeen ? "MODS  (!)" : "MODS"));
 		calls.Push(entry("Mods", "spr_menu_thin_blue_button", kBtnX, kBtnY, 336, 52, "MODS", "mods"));
 
@@ -2628,10 +2657,11 @@ namespace modspage
 		{
 			calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch") })));
 			calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch_2") })));
-			calls.Push(Call("draw_sprite_part", A({ Asset("spr_main_menu_panel"), 1, 360, 0, 600, 533, kPanelX + 360, kPanelY })));
+			calls.Push(Call("draw_sprite_part_ext", A({ Asset("spr_main_menu_panel"), 1, 360, 0, 600, 533, U(kPanelX + 360), U(kPanelY),
+				Scale(), Scale(), 16777215, 1 })));
 			calls.Push(Text(984, 455, lp.Title, "ft_standard_22_b", "white"));
 			calls.Push(Text(984, 483, Clip(lp.Sub, 70), "ft_standard_14_b", "grey"));
-			calls.Push(sprite("spr_main_menu_separator", 1260, 500));
+			calls.Push(Sprite("spr_main_menu_separator", 1260, 500));
 			double y = 540;
 			for (auto& [name, mod] : lp.Rows)
 			{
@@ -2647,7 +2677,7 @@ namespace modspage
 				: "when the mods are back. Until then, don't reforge, upgrade or sell them."), "ft_standard_13_b", "white"));
 			for (auto [label, x, act] : { std::tuple{ "Load anyway", 1084.0, "legendary:load" }, std::tuple{ "Back", 1268.0, "legendary:back" } })
 			{
-				calls.Push(sprite("spr_menu_grey_button", x, 790));
+				calls.Push(Sprite("spr_menu_grey_button", x, 790));
 				calls.Push(Label(x + 84, 816, label));
 				calls.Push(entry("LegendaryPrompt", "spr_menu_grey_button", x, 790, 168, 52, label, act));
 			}
@@ -2658,17 +2688,18 @@ namespace modspage
 		// the update-notes buttons sit in the box: drop them, then paint the box (border + interior) over the bake
 		calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch") })));
 		calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch_2") })));
-		calls.Push(Call("draw_sprite_part", A({ Asset("spr_main_menu_panel"), 1, 360, 0, 600, 533, kPanelX + 360, kPanelY })));
+		calls.Push(Call("draw_sprite_part_ext", A({ Asset("spr_main_menu_panel"), 1, 360, 0, 600, 533, U(kPanelX + 360), U(kPanelY),
+			Scale(), Scale(), 16777215, 1 })));
 		auto pager = [&](int& P, size_t Count)
 		{
 			int pages = (std::max)(1, static_cast<int>((Count + kPerPage - 1) / kPerPage));
 			P = ((P % pages) + pages) % pages;
 			if (pages > 1)
 			{
-				calls.Push(sprite("spr_selector_btn_l_v2", 1432, 837));
+				calls.Push(Sprite("spr_selector_btn_l_v2", 1432, 837));
 				calls.Push(entry("ModsPage", "spr_selector_btn_l_v2", 1432, 837, 24, 36, "", "page-"));
 				calls.Push(Text(1484, 855, std::to_string(P + 1) + " / " + std::to_string(pages), "ft_standard_14_b", "white", 1));
-				calls.Push(sprite("spr_selector_btn_r_v2", 1512, 837));
+				calls.Push(Sprite("spr_selector_btn_r_v2", 1512, 837));
 				calls.Push(entry("ModsPage", "spr_selector_btn_r_v2", 1512, 837, 24, 36, "", "page+"));
 			}
 		};
@@ -2685,7 +2716,7 @@ namespace modspage
 		calls.Push(Text(984, 455, "Installed mods", "ft_standard_22_b", "white"));
 		calls.Push(Text(984, 483, std::string("SlormAPI ") + kVersion + "   -   " + std::to_string(Mods.a.size()) + " installed, "
 			+ std::to_string(loaded) + " loaded", "ft_standard_14_b", "grey"));
-		calls.Push(sprite("spr_main_menu_separator", 1260, 500));
+		calls.Push(Sprite("spr_main_menu_separator", 1260, 500));
 		pager(Page, Mods.a.size());
 		for (size_t i = Page * kPerPage; i < Mods.a.size() && i < (Page + 1) * kPerPage; ++i)
 		{
@@ -2707,7 +2738,7 @@ namespace modspage
 			if (!locked)
 			{
 				const char* spr = on ? "spr_radio_small_btn_filled" : "spr_radio_small_btn";
-				calls.Push(sprite(spr, 1499, y - 6));
+				calls.Push(Sprite(spr, 1499, y - 6));
 				calls.Push(entry("ModsToggle", spr, 1499, y - 6, 36, 36, "", "toggle:" + m.GetStr("file")));
 				right = 1482;
 			}
@@ -2740,26 +2771,25 @@ namespace modspage
 	{
 		Calls.Push(Text(X + 48, Y, Clip(Label, 34), "ft_standard_12", "white"));
 		Calls.Push(Call("draw_set_color", A({ 0x020202 })));
-		Calls.Push(Call("draw_rectangle", A({ X + 19, Y + 18, X + 278, Y + 54, false })));
+		Calls.Push(Call("draw_rectangle", A({ U(X + 19), U(Y + 18), U(X + 278), U(Y + 54), false })));
 		Calls.Push(Call("draw_set_color", A({ 0x101010 })));
-		Calls.Push(Call("draw_rectangle", A({ X + 23, Y + 22, X + 274, Y + 50, false })));
+		Calls.Push(Call("draw_rectangle", A({ U(X + 23), U(Y + 22), U(X + 274), U(Y + 50), false })));
 		Calls.Push(Call("draw_set_color", A({ 0xFFFFFF })));
 		Calls.Push(Text(X + 48, Y + 30, Clip(Value, 28), "ft_standard_12", "grey"));
 		for (auto [spr, dx, op] : { std::tuple{ "spr_selector_btn_l_v2", -8.0, "prev" }, std::tuple{ "spr_selector_btn_r_v2", 288.0, "next" } })
 		{
-			Calls.Push(Call("draw_sprite", A({ Asset(spr), 0, X + dx, Y + 12 })));
-			Calls.Push(Call("$mba_push", A({ A({ "sel", Asset(spr), X + dx, Y + 12, 24, 36, "", Asset(kSink), "slormapi:" + Act + op }) })));
+			Calls.Push(Sprite(spr, X + dx, Y + 12));
+			Calls.Push(Entry("sel", spr, X + dx, Y + 12, 24, 36, "", Act + op));
 		}
 	}
 
 	// the game's radio (diamond, filled when on)
 	void Radio(Json& Calls, double X, double Y, const std::string& Label, bool On, const std::string& Act)
 	{
-		Calls.Push(Call("draw_sprite", A({ Asset("spr_radio_btn_v3"), 0, X, Y - 4 })));
-		if (On) Calls.Push(Call("draw_sprite", A({ Asset("spr_radio_cross_v2"), 0, X + 18, Y + 14 })));
+		Calls.Push(Sprite("spr_radio_btn_v3", X, Y - 4));
+		if (On) Calls.Push(Sprite("spr_radio_cross_v2", X + 18, Y + 14));
 		Calls.Push(Text(X + 48, Y + 14, Clip(Label, 40), "ft_standard_12", "white"));
-		Calls.Push(Call("$mba_push", A({ A({ "sel", Asset("spr_radio_btn_v3"), X, Y - 4, 36, 36, On ? Json(788) : Json(""),
-			Asset(kSink), "slormapi:" + Act + "toggle" }) })));
+		Calls.Push(Entry("sel", "spr_radio_btn_v3", X, Y - 4, 36, 36, On ? Json(788) : Json(""), Act + "toggle"));
 	}
 
 	Json BuildOptionsProgram()
@@ -2767,10 +2797,10 @@ namespace modspage
 		Json calls = Json::Array();
 		auto entry = [&](const char* Name, const char* Spr, double X, double Y, double W, double H, const std::string& Label, const std::string& Action)
 		{
-			calls.Push(Call("$mba_push", A({ A({ Name, Asset(Spr), X, Y, W, H, Label, Asset(kSink), "slormapi:" + Action }) })));
+			calls.Push(Entry(Name, Spr, X, Y, W, H, Label, Action));
 		};
-		calls.Push(Call("draw_sprite", A({ Asset("spr_menu_thin_grey_button"), 0, kOptBtnX, kOptBtnY })));
-		calls.Push(Call("scr_draw_text", A({ kOptBtnX + 168, kOptBtnY + 26, "Mods", 1, 1, "ft_standard_12", 1, 1, 0, 1, "white", "black", 1, true })));
+		calls.Push(Sprite("spr_menu_thin_grey_button", kOptBtnX, kOptBtnY));
+		calls.Push(Call("scr_draw_text", A({ U(kOptBtnX + 168), U(kOptBtnY + 26), "Mods", 1, 1, "ft_standard_12", 1, 1, 0, 1, "white", "black", 1, true })));
 		if (!OptOpen)
 		{
 			entry("ModsTab", "spr_menu_thin_grey_button", kOptBtnX, kOptBtnY, 336, 52, "Mods", "opt");
@@ -2783,11 +2813,11 @@ namespace modspage
 		{
 			return Op("?", { Op("==", { p, 0 }), A0, Op("?", { Op("==", { p, 1 }), A1, Op("?", { Op("==", { p, 2 }), A2, A3 }) }) });
 		};
-		calls.Push(Call("$mba_push", A({ A({ "Tab", Asset("spr_menu_large_grey_button"), 68, pick(148, 226, 304, 450), 336, 62,
+		calls.Push(Call("$mba_push", A({ A({ "Tab", Asset("spr_menu_large_grey_button"), U(68), U(pick(148, 226, 304, 450)), U(336), U(62),
 			pick("Gameplay", "Settings", "Keybinds", "Codex"), Asset("scr_ui_settings_change_panel"), p }) })));
 		// the game's controls of that tab sit under our panel: drop them, then paint the panel over the bake
-		calls.Push(Call("$mba_remove_in", A({ kOptPanelX + 1, kOptPanelY + 1, kOptPanelX + 1336, kOptPanelY + 789 })));
-		calls.Push(Call("draw_sprite", A({ Asset("spr_settings_mono_large"), 0, kOptPanelX, kOptPanelY })));
+		calls.Push(Call("$mba_remove_in", A({ U(kOptPanelX + 1), U(kOptPanelY + 1), U(kOptPanelX + 1336), U(kOptPanelY + 789) })));
+		calls.Push(Sprite("spr_settings_mono_large", kOptPanelX, kOptPanelY));
 		calls.Push(Text(1184, 190, "MODS", "ft_standard_16", "white", 1));
 
 		if (g_Settings.empty())
@@ -2802,12 +2832,12 @@ namespace modspage
 		for (auto& [name, st] : g_Settings)
 		{
 			if (y > 860) break;
-			calls.Push(Call("draw_sprite", A({ Asset("spr_menu_thin_grey_button"), 0, 560, y })));
-			calls.Push(Call("scr_draw_text", A({ 728, y + 26, Clip(name, 26), 1, 1, "ft_standard_12", 1, 1, 0, 1, "white", "black", 1, true })));
+			calls.Push(Sprite("spr_menu_thin_grey_button", 560, y));
+			calls.Push(Call("scr_draw_text", A({ U(728), U(y + 26), Clip(name, 26), 1, 1, "ft_standard_12", 1, 1, 0, 1, "white", "black", 1, true })));
 			if (name != OptMod) entry("ModsTabMod", "spr_menu_thin_grey_button", 560, y, 336, 52, Clip(name, 26), "optmod:" + name);
 			y += 66;
 		}
-		calls.Push(Call("draw_sprite", A({ Asset("spr_settings_separator"), 0, 926, 290 })));
+		calls.Push(Sprite("spr_settings_separator", 926, 290));
 
 		// right: the chosen mod's settings, in two columns
 		std::string title = OptMod, about;

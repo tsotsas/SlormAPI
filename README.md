@@ -221,6 +221,9 @@ tooltip, and their clicks come back as the `ui_clicked` event:
 | `$selector` | `id, x, y, label, value, tooltip?` (the game's ◀ value ▶ box) | `prev`, `next` |
 | `$text` | `x, y, text, font?, color?, halign?` (fonts by name, e.g. `ft_standard_12`) | – |
 
+Positions are the game's 1920×1080 layout; widgets follow the game's `ui_scale` (from the resolution) like its own
+controls.
+
 Your program runs every time the game draws that menu, so values in it can come from game variables (`{"$global":
 ...}`) or from your own state: change it with `ui_add` again (or `ui_refresh` if it reads game variables). Widgets
 you stop drawing are removed, and `ui_remove` takes everything of yours out of that menu.

@@ -616,6 +616,10 @@ Used by `ui_add`, a hook's `after` and `overlay`. A program runs at draw / bake 
 - `vars`: `[name, expression]`, evaluated in order. `when`: the whole program runs only if true. Each call: `fn`
   (an engine function, a game script, or a pseudo call below), `args` (expressions), optional `when`.
 - `self` is the hooked call's / the event's instance (in menus: `obj_ui_next_gen`).
+- Positions: the game lays its menus out for 1920×1080 and multiplies every position and size by `self.ui_scale`
+  (from the resolution) as it draws. [Widgets](#widgets-ui-kit) do that for you; a program's own
+  `draw_*` calls and `$mba_push` entries must scale themselves, e.g. `{"$op": "*", "args": [904, {"$self":
+  "ui_scale"}]}`, and draw sprites with `draw_sprite_ext` at that scale (`scr_draw_text` sizes its font itself).
 
 **Expressions**: JSON literals (with `$asset` / `$inst`), arrays of expressions, and
 
@@ -653,7 +657,8 @@ A program that fails (bad function, bad arguments) is dropped and its error is s
 ## Widgets (UI kit)
 
 The game's own controls in one call each, inside any draw program (usually `ui_add`). Clicks arrive as the event
-`ui_clicked` `{owner, id, action}` (owner = the program's owner).
+`ui_clicked` `{owner, id, action}` (owner = the program's owner). Positions are the game's 1920×1080 layout; the
+widgets follow the game's `ui_scale` (from the resolution) like its own controls.
 
 | widget | args | actions |
 |---|---|---|
@@ -819,7 +824,8 @@ Version 1.0.2c. Names are the game's own.
 | `scr_save_load_save(slot)` / `scr_run_start()` | self = `obj_ui_next_gen`: load a save / start a run |
 | `scr_ui_settings_change_panel(n)` | switch the Options tab |
 
-Rooms: `rm_procedural` while in a run. GUI coordinates are 1920×1080.
+Rooms: `rm_procedural` while in a run. GUI positions are the game's 1920×1080 layout times `ui_scale` (see
+[draw programs](#draw-programs)).
 
 ---
 
