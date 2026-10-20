@@ -2076,9 +2076,18 @@ static std::set<std::string> g_Toggled;            // files switched on / off th
 static fs::path AurieDir() { return GameDir() / "mods" / "aurie"; }
 static bool Exists(const fs::path& P) { std::error_code ec; return fs::exists(P, ec); }
 // what everything else needs: never switched off from the Mods page
-static bool Locked(const std::string& File) { auto f = Lower(File); return f == "slormapi.dll" || f == "yytoolkit.dll"; }
+// File: a path relative to mods/aurie ("X.dll", or "Folder/X.dll": Aurie loads the DLLs of every subfolder too)
+static std::string BaseName(const std::string& File) { return Lower(fs::path(File).filename().string()); }
+static bool Locked(const std::string& File) { auto f = BaseName(File); return f == "slormapi.dll" || f == "yytoolkit.dll"; }
 // loader parts that sit in mods/aurie: YYToolkit, and Slorm Loader's module when the game uses that loader
-static bool LoaderFile(const std::string& File) { auto f = Lower(File); return f == "yytoolkit.dll" || f == "slormloader.dll"; }
+static bool LoaderFile(const std::string& File) { auto f = BaseName(File); return f == "yytoolkit.dll" || f == "slormloader.dll"; }
+// a path inside mods/aurie that the Mods page may switch: relative, no "..", no drive
+static bool SafeModPath(const std::string& File)
+{
+	if (File.empty() || File.find(':') != std::string::npos || File[0] == '/' || File[0] == '\\') return false;
+	for (auto& part : fs::path(File)) if (part == ".." || part == ".") return false;
+	return true;
+}
 
 // A file a mod manager deployed as a hardlink (Vortex: more than one name for the same data). Renaming it to switch it
 // off would break the manager's deployment: it is switched in the manager instead.
@@ -2100,25 +2109,42 @@ static Json CmdMods()
 	std::vector<Row> rows;
 	std::set<std::string> listed;
 	fs::path aurie = AurieDir();
-	for (auto& m : g_Registered)
+	// every DLL Aurie loads: mods/aurie and its subfolders (a mod may keep its files in mods/aurie/<folder>/)
+	struct Dll { std::string Rel; fs::path Path; bool Off; };
+	std::vector<Dll> dlls;
+	std::map<std::string, std::string> byName;                      // "x.dll" -> its path relative to mods/aurie
+	std::error_code ec;
+	for (auto it = fs::recursive_directory_iterator(aurie, fs::directory_options::skip_permission_denied, ec);
+		it != fs::recursive_directory_iterator(); it.increment(ec))
 	{
+		if (ec) break;
+		std::error_code fe;
+		if (!it->is_regular_file(fe)) continue;
+		std::string rel = it->path().lexically_relative(aurie).generic_string(), low = Lower(rel);
+		bool off = low.ends_with(std::string(".dll") + kOff);
+		if (off) rel.resize(rel.size() - strlen(kOff));
+		else if (!low.ends_with(".dll")) continue;
+		dlls.push_back({ rel, it->path(), off });
+		std::string name = BaseName(rel);
+		if (!byName.count(name) || rel.find('/') == std::string::npos) byName[name] = rel;   // the top-level one first
+	}
+	for (auto m : g_Registered)
+	{
+		if (!Exists(aurie / m.File) && !Exists(aurie / (m.File + kOff)))
+			if (auto it = byName.find(BaseName(m.File)); it != byName.end()) m.File = it->second;   // in a subfolder
 		rows.push_back({ m, false, true, Exists(aurie / m.File) || !Exists(aurie / (m.File + kOff)) });
 		listed.insert(Lower(m.File));
 	}
-	std::error_code ec;
-	for (auto& f : fs::directory_iterator(aurie, ec))
+	for (auto& d : dlls)
 	{
-		if (!f.is_regular_file()) continue;
-		std::string file = f.path().filename().string();
-		bool off = Lower(file).ends_with(std::string(".dll") + kOff);
-		if (off) file.resize(file.size() - strlen(kOff));
-		else if (!Lower(file).ends_with(".dll")) continue;
+		const std::string& file = d.Rel;
+		bool off = d.Off;
 		if (listed.count(Lower(file)) || (off && Exists(aurie / file))) continue;
 		listed.insert(Lower(file));
-		ModInfo m{ fs::path(file).stem().string(), FileVersion(f.path()), "", "", file };
+		ModInfo m{ fs::path(file).stem().string(), FileVersion(d.Path), "", "", file };
 		bool loader = LoaderFile(file);
-		if (Lower(file) == "yytoolkit.dll") m.Author = "AurieFramework";
-		if (Lower(file) == "slormloader.dll")
+		if (BaseName(file) == "yytoolkit.dll") m.Author = "AurieFramework";
+		if (BaseName(file) == "slormloader.dll")
 		{
 			m.Name = "Slorm Loader";
 			if (m.Version.empty())                                   // no version resource: its runtime metadata has one
@@ -2129,7 +2155,7 @@ static Json CmdMods()
 				try { m.Version = sj::Parse(ss.str()).GetStr("version"); } catch (const std::exception&) {}
 			}
 		}
-		rows.push_back({ m, loader, GetModuleHandleW(fs::path(file).c_str()) != nullptr, !off });
+		rows.push_back({ m, loader, GetModuleHandleW(fs::path(file).filename().c_str()) != nullptr, !off });
 	}
 	// Aurie Core: mods/native/AurieCore.dll (patched game exe) or plugins/AurieCore.asi (Slorm Loader's version.dll)
 	auto core = [&](const fs::path& Dir, const char* Ext)
@@ -2321,7 +2347,7 @@ static Json CmdModEnable(const Json& Req)
 	std::string file = Req.GetStr("file");
 	bool on = Req.GetBool("enabled", true);
 	if (LuaToggle(file, on)) return Json(true);                // a Lua mod: mods/lua, applies right away
-	if (file.find_first_of("/\\:") != std::string::npos || !Lower(file).ends_with(".dll")) Fail("bad mod file '" + file + "'");
+	if (!SafeModPath(file) || !Lower(file).ends_with(".dll")) Fail("bad mod file '" + file + "'");
 	if (Locked(file)) Fail(file + " stays on: other mods need it");
 	fs::path dll = AurieDir() / file, off = AurieDir() / (file + kOff);
 	if (HardLinked(dll)) Fail(file + " is managed by Vortex: switch it on / off there");

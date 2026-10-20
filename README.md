@@ -81,7 +81,7 @@ Call `Request` on the game thread (from a YYToolkit callback). Every request is 
 | `hooks` / `hooklog` | – / `owner`, `max`, `consume` | list hooks (with each owner's layer) / read your captured calls |
 | `register_mod` | `name`, `version`, `author`, `description`, `file`, `requires`, `game` | show your mod on the Mods page; `requires` e.g. `{"SlormAPI": "1.0.0"}`, `game` the game version it was made for |
 | `mods` / `mods_page` | – / `enabled`, `open` | the installed mods / switch the Mods page off or open it |
-| `mod_enable` | `file` ("X.dll"), `enabled` | switch a mod of `mods/aurie` on or off for the next start |
+| `mod_enable` | `file` ("X.dll" or "Folder/X.dll"), `enabled` | switch a mod of `mods/aurie` on or off for the next start |
 | `overlay` | `event`, `vars`, `when`, `calls`, `ttl_ms` | a draw program run after an object event (default the GUI draw) |
 | `subscribe` / `unsubscribe` / `events` | `owner`, `events` / `owner`, `events` / `owner`, `max` | game events (below) |
 | `event_types` | | the event names |

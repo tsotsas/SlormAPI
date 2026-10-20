@@ -398,8 +398,9 @@ older ones drop) until read with `events`. C++ mods can use `Subscribe` instead 
 → `true`. Registering again updates your row.
 
 #### `mods`
-→ the Mods page's rows: SlormAPI, the DLLs of `mods/aurie` (registered or not, switched off ones too), Lua mods, then
-the loader parts. Each: `{name, version, author, description, file, kind: "mod" | "lua" | "loader", loaded, enabled,
+→ the Mods page's rows: SlormAPI, the DLLs of `mods/aurie` and its subfolders, as Aurie loads them (registered or
+not, switched off ones too; `file` is relative to `mods/aurie`, e.g. `"MyMod/MyMod.dll"`), Lua mods, then the loader
+parts. Each: `{name, version, author, description, file, kind: "mod" | "lua" | "loader", loaded, enabled,
 locked, pending, problems: [..], note?, managed?, game?}`. `pending` = switched this session, applies at the next
 start; `managed` = deployed by a mod manager (Vortex hardlink: switched there, not here).
 
@@ -407,7 +408,7 @@ start; `managed` = deployed by a mod manager (Vortex hardlink: switched there, n
 `enabled` *b* (turn SlormAPI's MODS button and page off / on), `open` *b* → `{enabled, open}`. Not for Lua.
 
 #### `mod_enable`
-`file` *s* (`"X.dll"` or `"x.lua"`), `enabled` *b* → `true`. DLLs are renamed to / from `X.dll.disabled` (applies
+`file` *s* (`"X.dll"`, `"Folder/X.dll"`, `"x.lua"` or `"<folder>/lua-pack.json"`, as `mods` lists it), `enabled` *b* → `true`. DLLs are renamed to / from `X.dll.disabled` (applies
 at the next start); Lua mods switch at once. Refused for SlormAPI, the loader and Vortex-managed files. Not for Lua.
 
 ### Settings
