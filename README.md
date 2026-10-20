@@ -241,7 +241,8 @@ slorm.legendary{
 ```
 
 They never reach a save file: the game saves each one as an Epic with the same stats, which becomes the legendary again
-after loading. Removing the mod leaves an ordinary Epic. Details: [docs/API.md](docs/API.md#custom-legendaries);
+after loading. Removing the mod leaves an ordinary Epic, and the player is asked before playing such a save (Load
+anyway / Back). Details: [docs/API.md](docs/API.md#custom-legendaries);
 a complete example: `examples/lua/legendary_windrunner.lua`.
 
 ## Mod settings

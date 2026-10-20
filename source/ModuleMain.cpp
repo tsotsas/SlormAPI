@@ -2047,6 +2047,11 @@ static std::string FileVersion(const fs::path& P)
 }
 
 static std::string LegendaryWaitingNotice();       // "! 2 custom legendaries wait for their mod: ..." (below)
+// the prompt before a save with custom legendaries whose mod is missing is played (legend, below): in the Welcome box
+struct LegendaryPromptView { std::string Title, Sub; std::vector<std::pair<std::string, std::string>> Rows; size_t More = 0; };
+static bool LegendaryPrompt(LegendaryPromptView& View);
+static void LegendaryPromptClick(const std::string& Action);   // "load" (load anyway) or "back"
+static bool g_MenuChanged = false;                 // the main menu bake must be drawn again
 static constexpr const char* kOff = ".disabled";   // "X.dll.disabled": switched off (Aurie loads only *.dll)
 static std::set<std::string> g_Toggled;            // files switched on / off this session (lower case)
 
@@ -2588,6 +2593,21 @@ namespace modspage
 	bool CrashSeen = false;   // the page was opened after a crash: the button's (!) goes
 	uint64_t LuaSeen = 0;
 
+	// the game keeps entries it did not make across its own redraws: ours are dropped first on every run (on every
+	// panel), then the Welcome panel adds the current ones again
+	Json Finish(Json Calls, const Json& When)
+	{
+		Json all = Json::Array();
+		for (const char* name : { "ModsPage", "ModsToggle", "LegendaryPrompt" }) all.Push(Call("$mba_remove", A({ 0, name })));
+		for (auto& c : Calls.a)
+		{
+			Json x = c;
+			x.Add("when", When);
+			all.Push(std::move(x));
+		}
+		return O({ { "calls", std::move(all) } });
+	}
+
 	Json BuildProgram(const Json& Mods)
 	{
 		auto entry = [](const char* Name, const char* Spr, double X, double Y, double W, double H, const char* Text,
@@ -2602,7 +2622,38 @@ namespace modspage
 		calls.Push(Call("draw_sprite", A({ Asset("spr_menu_thin_blue_button"), 0, kBtnX, kBtnY })));
 		calls.Push(Label(kBtnX + 168, kBtnY + 26, g_LastSession.GetBool("crashed", false) && !CrashSeen ? "MODS  (!)" : "MODS"));
 		calls.Push(entry("Mods", "spr_menu_thin_blue_button", kBtnX, kBtnY, 336, 52, "MODS", "mods"));
-		if (!Open) return O({ { "when", welcome }, { "calls", std::move(calls) } });
+
+		// a save with custom legendaries whose mod is missing is about to be played: LOAD ANYWAY or BACK
+		if (LegendaryPromptView lp; LegendaryPrompt(lp))
+		{
+			calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch") })));
+			calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch_2") })));
+			calls.Push(Call("draw_sprite_part", A({ Asset("spr_main_menu_panel"), 1, 360, 0, 600, 533, kPanelX + 360, kPanelY })));
+			calls.Push(Text(984, 455, lp.Title, "ft_standard_22_b", "white"));
+			calls.Push(Text(984, 483, Clip(lp.Sub, 70), "ft_standard_14_b", "grey"));
+			calls.Push(sprite("spr_main_menu_separator", 1260, 500));
+			double y = 540;
+			for (auto& [name, mod] : lp.Rows)
+			{
+				calls.Push(Text(984, y, Clip(name, 30), "ft_standard_16", "item_highlight"));
+				calls.Push(Text(1535, y + 2, Clip("mod: " + mod, 30), "ft_standard_13_b", "grey", 2));
+				y += 38;
+			}
+			if (lp.More) calls.Push(Text(984, y, "and " + std::to_string(lp.More) + " more", "ft_standard_13_b", "grey"));
+			bool one = lp.Rows.size() + lp.More == 1;
+			calls.Push(Text(984, 712, std::string(one ? "Without its mod it loads as an Epic, and becomes legendary again"
+				: "Without their mods they load as Epics, and become legendary again"), "ft_standard_13_b", "white"));
+			calls.Push(Text(984, 734, std::string(one ? "when the mod is back. Until then, don't reforge, upgrade or sell it."
+				: "when the mods are back. Until then, don't reforge, upgrade or sell them."), "ft_standard_13_b", "white"));
+			for (auto [label, x, act] : { std::tuple{ "Load anyway", 1084.0, "legendary:load" }, std::tuple{ "Back", 1268.0, "legendary:back" } })
+			{
+				calls.Push(sprite("spr_menu_grey_button", x, 790));
+				calls.Push(Label(x + 84, 816, label));
+				calls.Push(entry("LegendaryPrompt", "spr_menu_grey_button", x, 790, 168, 52, label, act));
+			}
+			return Finish(std::move(calls), welcome);
+		}
+		if (!Open) return Finish(std::move(calls), welcome);
 
 		// the update-notes buttons sit in the box: drop them, then paint the box (border + interior) over the bake
 		calls.Push(Call("$mba_remove", A({ 7, Asset("scr_ui_main_menu_patch") })));
@@ -2673,7 +2724,7 @@ namespace modspage
 				? "The game crashed while starting last time - a mod may be the cause"
 				: "The game closed unexpectedly last time", "ft_standard_13_b", "white"));
 		else calls.Push(Text(984, 855, "Mods are in the game folder: mods\\aurie and mods\\lua", "ft_standard_13_b", "grey"));
-		return O({ { "when", welcome }, { "calls", std::move(calls) } });
+		return Finish(std::move(calls), welcome);
 	}
 
 	// ---- Options menu: a "Mods" tab with every mod's settings, drawn like the game's own settings ----
@@ -2861,8 +2912,10 @@ namespace modspage
 				if (e.Args.a.empty() || e.Args.a[0].type != Json::Str || !e.Args.a[0].s.starts_with("slormapi:")) continue;
 				std::string act = e.Args.a[0].s.substr(9);
 				changed = true;
-				if (act == "mods")
+				if (act.starts_with("legendary:")) LegendaryPromptClick(act.substr(10));
+				else if (act == "mods")
 				{
+					LegendaryPromptClick("close");
 					Open = !Open;
 					if (Open) { Mods = Json(); Page = 0; Error.clear(); CrashSeen = true; }   // a fresh list each time
 				}
@@ -2919,6 +2972,15 @@ namespace modspage
 			}
 			if (OptOpen && menu != "settings") { OptOpen = false; changed = true; }   // Options closed
 		}
+		if (LegendaryPromptView lp; LegendaryPrompt(lp) && !changed && Now >= MenuCheckAt)
+		{
+			MenuCheckAt = Now + 0.25;
+			RValue ui = UiInstance();
+			auto var = [&](const char* Name) { return g_Yytk->CallBuiltin("variable_instance_get", { ui, RValue(Name) }); };
+			if (KindOf(ui) == VALUE_UNDEFINED || GmlString(var("menu_show")) != "main" || Num(var("main_panel")) != 0)
+				LegendaryPromptClick("close");                     // the menu closed or another panel was chosen
+		}
+		if (g_MenuChanged) { g_MenuChanged = false; changed = true; }
 		if (g_Registered.size() != RegisteredSeen) { RegisteredSeen = g_Registered.size(); Mods = Json(); changed = true; }
 		if (g_SettingsVer != SettingsSeen) { SettingsSeen = g_SettingsVer; changed = true; }
 		if (LuaVersion() != LuaSeen) { LuaSeen = LuaVersion(); Mods = Json(); changed = true; }
@@ -3873,6 +3935,7 @@ namespace legend
 
 	// ---- saves: custom legendaries are saved as Epics; the Epics are known again by their exact contents
 	std::map<std::string, Json> Saved;          // fingerprint of the Epic -> {"id", "line": the L line}
+	std::map<std::string, Json> Slots;          // save slot ("1") -> [{"id", "name"}]: what that save holds
 	bool SavedLoaded = false, SavedDirty = false;
 	fs::path SavedFile() { return AurieDir() / "SlormAPI" / "data" / "legendary_items.json"; }
 
@@ -3889,6 +3952,8 @@ namespace legend
 			Json j = sj::Parse(ss.str());
 			if (const Json* items = j.Find("items"); items && items->type == Json::Obj)
 				for (auto& [k, v] : items->o) Saved[k] = v;
+			if (const Json* slots = j.Find("slots"); slots && slots->type == Json::Obj)
+				for (auto& [k, v] : slots->o) Slots[k] = v;
 		}
 		catch (const std::exception&) {}
 	}
@@ -3900,6 +3965,9 @@ namespace legend
 		Json j = Json::Object();
 		j.Add("version", 1);
 		j.Add("items", std::move(items));
+		Json slots = Json::Object();
+		for (auto& [k, v] : Slots) slots.Add(k, v);
+		j.Add("slots", std::move(slots));
 		std::error_code ec;
 		fs::create_directories(SavedFile().parent_path(), ec);
 		fs::path tmp = SavedFile();
@@ -3989,6 +4057,65 @@ namespace legend
 	struct Swap { size_t Hero, Index; RValue Original; };
 	std::vector<Swap> Swaps;
 
+	// ---- what each save slot holds, so a save can be checked before it is loaded
+	struct Waiting { std::string Name, Id; };
+
+	bool IsEpic(RValue& Item)
+	{
+		RValue* h = ArrayAt(Item, 0);
+		RValue* rarity = h ? ArrayAt(*h, 0) : nullptr;
+		return rarity && KindOf(*rarity) == VALUE_STRING && rarity->ToString() == "epic";
+	}
+
+	// the custom legendaries in the inventory now: as legendaries, or as the Epics they were saved as (one per id)
+	std::vector<Waiting> Contents()
+	{
+		std::vector<Waiting> out;
+		auto add = [&](const std::string& Id, const std::string& Name)
+		{
+			for (auto& w : out) if (w.Id == Id) return;
+			out.push_back({ Name, Id });
+		};
+		EachSlot([&](size_t, size_t, RValue& Item)
+		{
+			size_t line = 0;
+			if (Def* d = Defs.empty() ? nullptr : CustomOf(Item, line)) add(d->Id, d->Name);
+			else if (!Saved.empty() && IsEpic(Item))
+				if (auto it = Saved.find(Fingerprint(Item)); it != Saved.end())
+					add(it->second.GetStr("id"), it->second.GetStr("name", it->second.GetStr("id")));
+		});
+		return out;
+	}
+
+	int SaveSlot()
+	{
+		RValue* v = FindMember(GlobalRValue(), "save_file");
+		return v && IsNumeric(*v) ? static_cast<int>(v->ToDouble()) : -1;
+	}
+
+	// remembers what the current save slot holds (written with the next WriteSaved)
+	void RecordSlot()
+	{
+		int slot = SaveSlot();
+		if (slot < 0) return;
+		Json list = Json::Array();
+		for (auto& w : Contents())
+		{
+			Json e = Json::Object();
+			e.Add("id", w.Id);
+			e.Add("name", w.Name);
+			list.Push(std::move(e));
+		}
+		std::string key = std::to_string(slot);
+		auto it = Slots.find(key);
+		if (list.a.empty())
+		{
+			if (it != Slots.end()) { Slots.erase(it); SavedDirty = true; }
+			return;
+		}
+		if (it == Slots.end() || sj::Dump(it->second) != sj::Dump(list)) { Slots[key] = std::move(list); SavedDirty = true; }
+	}
+
 	RValue* SlotAt(size_t Hero, size_t Index)
 	{
 		RValue* inv = FindMember(GlobalRValue(), "inventory");
@@ -3998,9 +4125,11 @@ namespace legend
 
 	bool PreSave(CInstance*, int ArgCount, RValue** Args, RValue&)
 	{
-		if (Defs.empty() || ArgCount < 1 || !Args[0] || KindOf(*Args[0]) != VALUE_STRING || Args[0]->ToString() != "inventory") return false;
+		if (ArgCount < 1 || !Args[0] || KindOf(*Args[0]) != VALUE_STRING || Args[0]->ToString() != "inventory") return false;
 		LoadSaved();
 		Swaps.clear();
+		RecordSlot();                                            // what this save holds, for the check before a load
+		if (Defs.empty()) return false;
 		EachSlot([&](size_t H, size_t I, RValue& Item)
 		{
 			size_t line = 0;
@@ -4057,8 +4186,8 @@ namespace legend
 	}
 
 	// Epics in the loaded inventory that were custom legendaries whose mod is not loaded (or switched off) now:
-	// shown as a warning over the game for a while, and on the Mods page until they are back
-	struct Waiting { std::string Name, Id; };
+	// asked about before the save is played (CONTINUE, Load Game), else shown as a warning over the game for a
+	// while; and on the Mods page until they are back
 	std::vector<Waiting> WaitingList;
 	double CheckAt = 0, WarnLeft = 0, WarnTick = 0;
 
@@ -4067,11 +4196,14 @@ namespace legend
 		LoadSaved();
 		WaitingList.clear();
 		if (Saved.empty()) return;
+		if (KindOf(HeroInstance()) != VALUE_UNDEFINED)           // a save is loaded: remember what it holds
+		{
+			RecordSlot();
+			if (SavedDirty) WriteSaved();
+		}
 		EachSlot([&](size_t, size_t, RValue& Item)
 		{
-			RValue* h = ArrayAt(Item, 0);
-			RValue* rarity = h ? ArrayAt(*h, 0) : nullptr;
-			if (!rarity || KindOf(*rarity) != VALUE_STRING || rarity->ToString() != "epic") return;
+			if (!IsEpic(Item)) return;
 			auto it = Saved.find(Fingerprint(Item));
 			if (it == Saved.end()) return;
 			Def* d = ById(it->second.GetStr("id"));
@@ -4088,24 +4220,130 @@ namespace legend
 		return names;
 	}
 
-	// the mods they belong to: "lua:my_mod:item" -> "my_mod (Lua)", "MyMod:item" -> "MyMod"
+	// the mod a custom legendary belongs to: "lua:my_mod:item" -> "my_mod (Lua)", "MyMod:item" -> "MyMod"
+	std::string ModOf(const std::string& Id)
+	{
+		std::string owner = Id.substr(0, Id.rfind(':'));
+		return owner.starts_with("lua:") ? owner.substr(4) + " (Lua)" : owner;
+	}
+
 	std::string WaitingMods()
 	{
 		std::set<std::string> mods;
-		for (auto& w : WaitingList)
-		{
-			std::string owner = w.Id.substr(0, w.Id.rfind(':'));
-			mods.insert(owner.starts_with("lua:") ? owner.substr(4) + " (Lua)" : owner);
-		}
+		for (auto& w : WaitingList) mods.insert(ModOf(w.Id));
 		std::string out;
 		for (auto& m : mods) out += (out.empty() ? "" : ", ") + m;
 		return out;
 	}
 
+	// ---- the prompt before such a save is played: LOAD ANYWAY or BACK (drawn in the main menu by the Mods page)
+	struct Prompt { bool Open = false; int Slot = -1; std::vector<Waiting> List; };   // Slot -1: CONTINUE
+	Prompt Ask;
+	bool Confirmed = false;        // the player knows about the loaded save's waiting legendaries: no prompt, no banner
+	bool PassLoad = false;         // LOAD ANYWAY on a save slot: that load goes through...
+	bool ConfirmNextLoad = false;  // ...and counts as confirmed
+
 	void PostLoad(CInstance*, int, RValue**, RValue&)
 	{
 		Restore();
+		Confirmed = ConfirmNextLoad;
+		ConfirmNextLoad = false;
+		WarnLeft = 0;                                              // a banner of the save before is not for this one
 		CheckAt = MicrosSinceStart() / 1e6 + 4;                    // Lua mods that start late get time to register first
+	}
+
+	// the custom legendaries of a save slot whose mod is not loaded (or switched off) now
+	std::vector<Waiting> WaitingInSlot(int Slot)
+	{
+		LoadSaved();
+		std::vector<Waiting> out;
+		auto it = Slots.find(std::to_string(Slot));
+		if (it == Slots.end() || it->second.type != Json::Arr) return out;
+		RValue* prefix = FindMember(GlobalRValue(), "name_save_file");          // "save_": the slot's file, save_<slot>
+		std::string file = (prefix && KindOf(*prefix) == VALUE_STRING ? prefix->ToString() : std::string("save_")) + std::to_string(Slot);
+		if (!g_Yytk->CallBuiltin("file_exists", { RStr(file) }).ToBoolean()) return out;   // deleted: a new game starts there
+		for (auto& e : it->second.a)
+		{
+			Def* d = ById(e.GetStr("id"));
+			if (d && d->Active && d->Ref >= 0) continue;
+			out.push_back({ e.GetStr("name", e.GetStr("id")), e.GetStr("id") });
+		}
+		return out;
+	}
+
+	CInstance* UiSelf()
+	{
+		RValue ui = modspage::UiInstance();
+		return KindOf(ui) == VALUE_UNDEFINED ? nullptr : InstanceById(static_cast<int32_t>(ui.ToInt64()));
+	}
+
+	void ChangePanel(CInstance* Ui, const char* Panel)
+	{
+		if (!Ui) return;
+		RValue r;
+		g_Yytk->CallGameScriptEx(r, "gml_Script_scr_main_change_panel", Ui, Ui, { RStr(Panel) });
+	}
+
+	void OpenPrompt(CInstance* Ui, int Slot, std::vector<Waiting> List)
+	{
+		Ask = { true, Slot, std::move(List) };
+		modspage::Open = false;
+		if (Ui && g_Yytk->CallBuiltin("variable_instance_get", { RValue(Ui), RValue("main_panel") }).ToDouble() != 0)
+			ChangePanel(Ui, "main_0");                             // the Welcome box shows it
+		g_MenuChanged = true;
+		DbgPrintEx(LOG_SEVERITY_INFO, "[SlormAPI] asking before %s: %zu custom legendar%s without its mod",
+			Slot < 0 ? "continuing" : ("loading save " + std::to_string(Slot)).c_str(), Ask.List.size(), Ask.List.size() == 1 ? "y" : "ies");
+	}
+
+	// CONTINUE plays the save that is already loaded
+	bool PreMenuButton(CInstance* Self, int ArgCount, RValue** Args, RValue&)
+	{
+		if (Confirmed || ArgCount < 1 || !Args[0] || KindOf(*Args[0]) != VALUE_STRING || Args[0]->ToString() != "continue") return false;
+		CheckWaiting();
+		if (WaitingList.empty()) return false;
+		OpenPrompt(Self, -1, WaitingList);
+		return true;
+	}
+
+	// Load Game: a save slot is loaded
+	bool PreLoadSlot(CInstance* Self, int ArgCount, RValue** Args, RValue&)
+	{
+		if (PassLoad) { PassLoad = false; return false; }
+		if (ArgCount < 1 || !Args[0] || !IsNumeric(*Args[0])) return false;
+		int slot = static_cast<int>(Args[0]->ToDouble());
+		std::vector<Waiting> list = WaitingInSlot(slot);
+		if (list.empty()) return false;
+		OpenPrompt(Self, slot, std::move(list));
+		return true;
+	}
+
+	void Click(const std::string& Action)
+	{
+		if (!Ask.Open) return;
+		Prompt was = Ask;
+		Ask = Prompt{};
+		g_MenuChanged = true;
+		CInstance* ui = UiSelf();
+		if (Action == "back")
+		{
+			if (was.Slot >= 0) ChangePanel(ui, "main_2");          // back to the saves
+		}
+		else if (Action == "load" && ui)
+		{
+			RValue r;
+			Confirmed = true;
+			WarnLeft = 0;
+			if (was.Slot < 0)
+			{
+				g_Yytk->CallGameScriptEx(r, "gml_Script_scr_ui_main_menu_buttons", ui, ui, { RStr("continue") });
+			}
+			else
+			{
+				PassLoad = ConfirmNextLoad = true;
+				g_Yytk->CallGameScriptEx(r, "gml_Script_scr_save_load_save", ui, ui, { RValue(static_cast<double>(was.Slot)) });
+				PassLoad = false;
+			}
+		}
 	}
 
 	// over the game's GUI while no menu is open, for WarnLeft seconds of being shown
@@ -4117,6 +4355,7 @@ namespace legend
 		double now = MicrosSinceStart() / 1e6;
 		if (WarnTick > 0) WarnLeft -= (std::min)(0.25, now - WarnTick);
 		WarnTick = now;
+		Confirmed = true;                                          // seen: CONTINUE in the pause menu does not ask again
 		auto text = [&](double X, double Y, const std::string& S, const char* Font, const char* Color)
 		{
 			std::vector<RValue> a = { RValue(X), RValue(Y), RStr(S), RValue(1.0), RValue(1.0), RStr(Font), RValue(1.0), RValue(1.0),
@@ -4203,6 +4442,8 @@ namespace legend
 		NativeHookInstall("scr_save_load", { "SlormAPI.legendary", nullptr, PostLoad });
 		NativeHookInstall("scr_loot_save_deconstruct", { "SlormAPI.legendary", PreDeconstruct, nullptr });
 		NativeHookInstall("scr_storage_check_if_legendary_owned", { "SlormAPI.legendary", PreStorageOwned, nullptr });
+		NativeHookInstall("scr_ui_main_menu_buttons", { "SlormAPI.legendary", PreMenuButton, nullptr });
+		NativeHookInstall("scr_save_load_save", { "SlormAPI.legendary", PreLoadSlot, nullptr });
 	}
 
 	// ---- effects
@@ -4362,13 +4603,17 @@ namespace legend
 		{                                                           // are watched even when no mod registers one now
 			Started = true;
 			LoadSaved();
-			if (!Saved.empty()) EnsureHooks();
+			if (!Saved.empty())
+			{
+				EnsureHooks();
+				if (CheckAt <= 0) CheckAt = now + 4;                // the save the game loaded while starting
+			}
 		}
 		if (CheckAt > 0 && now >= CheckAt)
 		{
 			CheckAt = 0;
 			CheckWaiting();
-			if (!WaitingList.empty())
+			if (!WaitingList.empty() && !Confirmed)
 			{
 				WarnLeft = 15;
 				DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] %zu custom legendar%s wait for their mod (%s): %s",
@@ -4584,6 +4829,25 @@ static Json CmdLegendaryEquipped(const Json& Req)
 	return it != legend::Equipped.end() && d.Active ? Json(it->second) : Json();
 }
 static Json CmdLegendaryDrop(const Json& Req) { return legend::Drop(Req); }
+static bool LegendaryPrompt(LegendaryPromptView& View)
+{
+	auto& ask = legend::Ask;
+	if (!ask.Open) return false;
+	size_t n = ask.List.size();
+	std::set<std::string> mods;
+	for (auto& w : ask.List) mods.insert(legend::ModOf(w.Id));
+	View.Title = mods.size() == 1 ? "A mod is missing" : "Mods are missing";
+	static const char* roman[] = { "", "I", "II", "III", "IV", "V" };           // as the Load Game panel names them
+	std::string slot = ask.Slot >= 1 && ask.Slot <= 5 ? roman[ask.Slot] : std::to_string(ask.Slot);
+	View.Sub = std::string(ask.Slot < 0 ? "This save" : "Save " + slot) + " has " + std::to_string(n)
+		+ (n == 1 ? " custom legendary" : " custom legendaries") + " from a mod that is not loaded:";
+	View.Rows.clear();
+	for (size_t i = 0; i < n && i < 4; ++i) View.Rows.push_back({ ask.List[i].Name, legend::ModOf(ask.List[i].Id) });
+	View.More = n > 4 ? n - 4 : 0;
+	return true;
+}
+static void LegendaryPromptClick(const std::string& Action) { legend::Click(Action); }
+
 static std::string LegendaryWaitingNotice()
 {
 	size_t n = legend::WaitingList.size();

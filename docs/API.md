@@ -695,9 +695,11 @@ slorm.legendary{
 the same stats, and SlormAPI notes which Epic it was (`mods/aurie/SlormAPI/data/legendary_items.json`); after loading,
 or when the legendary registers, the Epic becomes the legendary again. So:
 - removing the mod (or SlormAPI) leaves an ordinary Epic, never a broken item;
-- with SlormAPI installed but the mod missing, the player is warned after loading (over the game for 15 seconds,
-  and on the Mods page): which legendaries wait for which mod, and not to reforge, upgrade or sell those Epics -
-  a changed Epic can no longer be recognized;
+- with SlormAPI installed but the mod missing, the player is asked before playing that save (CONTINUE, or a save
+  in Load Game): which legendaries wait for which mod, and not to reforge, upgrade or sell those Epics - a changed
+  Epic can no longer be recognized - with **Load anyway** and **Back**. If the save starts some other way, the same
+  warning shows over the game for 15 seconds; the Mods page lists them until the mod is back. SlormAPI knows what
+  each save slot holds from its last save (also in `legendary_items.json`);
 - keep the `id` the same: the Epic finds its legendary by it;
 - a save copied to another PC (or Steam Cloud) has the Epic there; it becomes the legendary on a PC that has the
   mod and its `legendary_items.json`.
