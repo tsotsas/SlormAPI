@@ -20,9 +20,6 @@ On its own it adds two things to the game's menus:
 
 ![Options > Mods](docs/options_mods.png)
 
-It also fixes three of the game's own bugs, for every hero: the launcher's Wrath buttons stopping on a GML error,
-collision-map sprites never freed, and frame time growing run after run (the game's path table).
-
 The Mods page also warns when something is wrong: a mod whose requirements are not met ("Needs SlormAPI 1.0.0"), a
 Lua mod with an error, a mod whose game functions were not found after a game update, and a game that crashed last
 time (the button then reads MODS (!)).

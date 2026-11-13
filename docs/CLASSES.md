@@ -433,11 +433,5 @@ Dialogue text (`talk`, `say`, mission lines) uses the game's format: pages split
 - **Base hero's mechanics.** Four of the 120 reapers name a base hero's mechanic or skill (Big Fury, Time and Space,
   the two Great Necromancy). With an own kit their effect has nothing to work on.
 - **Game version.** Made and checked on The Slormancer 1.0.2c. A few parts depend on that build's code and check it
-  first; on another build they stay off and the log says so. Those are the reaper tables for heroes 5+ in menus, and
-  the path fix below.
+  first; on another build they stay off and the log says so (e.g. the reaper tables for heroes 5+ in menus).
 - **Classes and saves.** The game's own save never holds a class, so other tools see a three-hero save.
-
-SlormAPI 2.0.0 also fixes three of the game's own bugs, for every hero:
-- the launcher's Wrath buttons stopping on a GML error;
-- collision-map sprites never freed;
-- frame time growing with every run, because the game's path table is searched by name each frame.
