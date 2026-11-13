@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "type": "slorm-lua",
+  "id": "evil_knight",
+  "name": "Evil Knight",
+  "version": "1.0.0",
+  "author": "thothas",
+  "description": "An example class for SlormAPI: its own skills, upgrade tree, specializations, mechanic (Malice), legacy tree, achievements, reapers, legendaries and story. Looks like an inverted Knight.",
+  "entry": "main.lua",
+  "requires": {
+    "slorm.slormapi": "2.0.0"
+  }
+}

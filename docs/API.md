@@ -1,7 +1,8 @@
-# SlormAPI 1.0.3 — API reference
+# SlormAPI 2.0.0 — API reference
 
 Everything a mod can do through SlormAPI: every command with its fields and results, the events, draw programs and
-widgets, Lua mods, settings, data files, and the game facts you need to use them.
+widgets, Lua mods, settings, data files, and the game facts you need to use them. Custom classes and the game heroes'
+content have their own guide: [CLASSES.md](CLASSES.md).
 
 - [How it works](#how-it-works)
 - [Making a mod](#making-a-mod) — [C++](#a-c-mod) · [Lua](#a-lua-mod) · [external tool (dev server)](#an-external-tool-the-dev-server)
@@ -16,8 +17,10 @@ widgets, Lua mods, settings, data files, and the game facts you need to use them
   - [Data files](#data-files): `mod_data` `mod_log`
   - [Game knowledge](#game-knowledge): `item_info` `stat_info` `stat_list` `hero_stats` `slot_info` `legendary_info` `skill_info`
   - [Legendaries](#legendaries): `register_legendary` `unregister_legendary` `legendaries` `legendary_equipped` `legendary_drop` `legendaries_waiting`
+  - [Classes and hero content](#classes-and-hero-content): `register_class` `register_hero` `unregister_hero` `class_rank` `legacy_rank` `content_row` `class_meter` `class_achievement` `class_reaper` `class_mission` `switch_hero`
+  - [Dialogues, sprites and sounds](#dialogues-sprites-and-sounds): `say` `sprite_file` `sound_file` `sound_play`
   - [Buffs](#buffs): `buff_add` `buff_remove` `buff_stacks`
-  - [Other](#other): `batch` `perf` `runner` `routines` `routine_index`
+  - [Other](#other): `batch` `perf` `profile` `catch_errors` `runner` `routines` `routine_index` `static_value`
 - [Events](#events)
 - [Draw programs](#draw-programs)
 - [Widgets (UI kit)](#widgets-ui-kit)
@@ -517,7 +520,7 @@ New legendary items for the game - see [Custom legendaries](#custom-legendaries)
 | `id` *s* | keep it the same in every version: saved items find their legendary by it |
 | `name`, `description` *s* | the item's name and text; `@` in the text shows the next number of `stats` then `values` (scaled by the item's roll like the game's) |
 | `slot` *s* | `helm` `body` `shoulder` `bracer` `glove` `boot` `ring` `amulet` `belt` `cape` |
-| `hero` *n* [-1] | -1 every hero, 0 Knight, 1 Huntress, 2 Mage |
+| `hero` *n* [-1] | -1 every hero, 0 Knight, 1 Huntress, 2 Mage, 3+ a custom class (`C.hero`: it drops for that class only) |
 | `lootable` *b* [true] | drops (and appears in reforging) like the game's legendaries |
 | `stats` *o* | `{stat: value}` while it is worn, scaled by its roll (75-100%); any key of `stat_list` except the two flat knockback ones |
 | `values` *a* | more numbers for `@` in the description (not stats) |
@@ -554,6 +557,82 @@ testing, or as a reward. → the `obj_loot` stub.
 → `[{name, id}]`: items in the inventory that were custom legendaries when they were saved and whose mod is not
 loaded (or switched off) now - they are Epics until it is back.
 
+### Classes and hero content
+
+A class is a playable hero of its own; the game's three heroes can get content too. How it all works, every option
+and the Lua side: [CLASSES.md](CLASSES.md). A class's `class` key below is `"<owner>:<id>"`; a game hero's is
+`"hero:<n>"`.
+
+#### `register_class`
+`owner`, `id` *s*, then the options of [CLASSES.md](CLASSES.md#options): `name`, `title`, `base` (0-2 or `"none"`),
+`kit` (`"own"`), `skills`, `entries`, `texts`, `weapon`, `attribute`, `talk`, `talk_as`, `hub_x`, `hub_y`, `art`,
+`skins`, `skin_name`, `sounds`, `reapers`, `legacies`, `legacy_base`, `achievements`, `achievements_base`, `missions`,
+`area` → `{hero, citizen, tag, key}`, plus `legacy_first`, `mission_first` + `missions`, `achievement_first` +
+`achievements` when it has them, and `rows`, `effects`, `passives` with kit `"own"`. The same owner and id again: the
+same class, its options replaced (also while it is played). Options are checked before anything changes; a bad one is
+an error naming it.
+
+#### `register_hero`
+`owner`, `hero` (0-2 or `"knight"` / `"huntress"` / `"mage"`), and a class's `art`, `skins`, `skin_name`, `reapers`,
+`sounds`, `achievements`, `missions`, `legacies` → `{hero, key, legacy_first, mission_first}`: that hero's content
+from your mod while it is played. Again from the same owner: your part replaced. Several mods' parts are merged
+([CLASSES.md](CLASSES.md#the-games-heroes-register_hero)).
+
+#### `unregister_hero`
+`owner`, `hero` (none = every hero) → how many parts were taken out.
+
+#### `class_rank`
+`entry` *n* (a row of the class's table) → the played class's rank of that entry (0: not taken).
+
+#### `legacy_rank`
+`legacy` *n* (a row of the legacy table), or `class` + `index` (+ `owner`): a legacy of that class / game hero by its
+place in your mod's list → the played hero's rank (0 unless that content is played).
+
+#### `content_row`
+`class`, `legacy` *n* (its place in your mod's list) or `mission` *s* (its id), `owner` → that legacy's row in the
+legacy table / that mission's number in the story table now, or null. A game hero's rows move when another mod's part
+of it changes: ask again rather than keep the number.
+
+#### `class_meter`
+`class`, `value` *n* (< 0: hidden), `max` *n* [10], `lit` *b* → `true`. The class's mechanic on the HUD (its base
+hero's widget), in battle.
+
+#### `class_achievement`
+`class`, `id`, `value` *n* or `add` *n* → its value now (a `stat`-counted one: read only). `id` `"base_<row>"` reads
+one of its base hero's mirrored achievements.
+
+#### `class_reaper`
+`class` → `{ref, primordial, level}` of the reaper worn (null when it is not played); with `effect` *n* (a reaper):
+whether that reaper's effect is on (worn, or one the worn one evolved from).
+
+#### `class_mission`
+`class`, `id` → its hero's runs of that mission (done: 1 or more).
+
+#### `switch_hero`
+`hero` *n* → `true`: switches to that hero (0-2 or a class) with the game's own switch (it saves, then the hub loads
+with that hero). Not for Lua.
+
+### Dialogues, sprites and sounds
+
+#### `say`
+`text` *s* (the game's dialogue format: `[speaker]page/page`, `#` a line break, `[tag]` a citizen, `[hero]` the hero
+played), `key` *s* (your line's name), `choice` *s* (its last page asks Yes / No; Yes raises `dialogue_choice
+{owner, id}` with this id) → your owner. Shows the dialogue in the game's box. Lua: `slorm.say`.
+
+#### `sprite_file`
+`file` *s*, `frames` *n*, `xorig`, `yorig` *n*, `like` (a sprite) → a sprite from a PNG / GIF / JPG strip (frames
+side by side: `frames`, else as many of `like`'s width as fit, else 1; origin: given, else `like`'s, else the
+middle), made once per file version. The path is relative to `mods/` (a Lua mod: its folder) and must stay inside
+`mods/`.
+
+#### `sound_file`
+`file` *s* → a sound from an `.ogg` (streamed) or `.wav` (PCM, 8 / 16 bit, mono / stereo) file; paths as
+`sprite_file`.
+
+#### `sound_play`
+`sound` *n* (`sound_file`'s or a game sound's number), `gain` *n* [1], `pitch` *n*, `loop` *b* → the playing
+instance. Its gain is × the game's sound effect volume.
+
 ### Buffs
 
 The game's own buffs: stats while they last, stacks, timers, and (with an icon) a place in the buff bar.
@@ -584,11 +663,26 @@ cannot nest batches.
 #### `perf`
 `enable` *b*, `reset` *b* → SlormAPI's own cost per frame since the last reset: `{enabled, frames,
 callbacks_us_per_frame, ticks_us_per_frame, modspage_us_per_frame, events_us_per_frame, lua_us_per_frame,
-detours_us_per_frame, object_events_per_frame, hooked_calls_per_frame}`. Off unless enabled. Not for Lua.
+detours_us_per_frame, object_events_per_frame, hooked_calls_per_frame, exchange_us_per_frame, exchanges_per_frame}`
+(`exchange`: a base-kit class's data put in its base hero's place around the game's code). Off unless enabled. Not
+for Lua.
+
+#### `profile`
+`enable` *b*, `top` *n* [60] → per frame since it was enabled: `{enabled, frames, frame_us, events_us, ...}` and the
+object events with the most time of their own. For finding what costs frame time (any mod or the game). Not for Lua.
+
+#### `catch_errors`
+`enable` *b*, `errors_off` *b*, `reset` *b* → `{enabled, errors_off, errors}`. For development: with `enable` a GML
+error in an object event leaves that event instead of stopping the game with the runner's error box (logged; an event
+that fails 3 times is skipped from then on); `errors_off` sets the runner's own "errors off" flag. Not for Lua.
 
 #### `runner` / `routines` / `routine_index`
 Reverse-engineering helpers: RVAs of the runner's helper functions; `names` → RVAs of built-in functions; `names` →
 their function-table indices. Not for Lua.
+
+#### `static_value`
+`address` *s* (e.g. `"0x1420f8130"`, an address of the exe as decompiled at image base 0x140000000) → the game's
+static value there. Reverse engineering. Not for Lua.
 
 ---
 
@@ -614,12 +708,18 @@ someone listens; watchers compare state each frame (or a few times a second).
 | `run_started` / `run_ended` | — | `scr_run_start` / `scr_run_end` |
 | `loot_dropped` | `loot` (the `obj_loot` stub), `item` ([item array](#items)), `info` (as `item_info`) | new `obj_loot` instances |
 | `gold_changed` | `gold`, `delta` | `global.gold` |
-| `level_up` | `level`, `previous`, `hero` (0 Knight, 1 Huntress, 2 Mage) | `global.level[hero]` |
+| `level_up` | `level`, `previous`, `hero` (0 Knight, 1 Huntress, 2 Mage, 3+ a class) | `global.level[hero]` |
 | `item_equipped` | `slot` (key), `index` (0-10), `hero`, `item`, `previous`, `info` (also when a slot is emptied) | the hero's 11 slots, 4×/s |
 | `room_changed` | `room`, `previous` (room names) | the current room |
 | `menu_changed` | `menu`, `previous` (`obj_ui_next_gen.menu_show`) | the open menu |
 | `setting_changed` | `mod`, `key`, `value` | `set_setting` / Options > Mods |
 | `ui_clicked` | `owner`, `id`, `action` | a click on a [widget](#widgets-ui-kit) |
+| `class_cast` | `class` (its key), `skill` (row), `hero`, `x`, `y` (the hero), `precast_x`, `precast_y` (the aim), `facing`, `forced`, `element`, `dmg_type` | a skill of a class with kit `"own"` cast ([CLASSES.md](CLASSES.md#skill-code)) |
+| `class_hit` | `class`, `skill`, `target`, `primary`, `hero` | each hit of such a skill |
+| `legacy_used` | `class`, `legacy` (its row), `id`, `owner`, `index` (its place in its mod's list), `kind` (`aura` / `active`), `on` (an aura toggled on), `slot`, `hero` | a class's or game hero's activable legacy used |
+| `class_achievement` | `class`, `id`, `step`, `steps` | one of its own achievements reached a new step |
+| `mission_started` / `mission_done` | `class`, `mission` (id), `owner`, `ref` (its number in the story table); `runs` (done) | its story mission started / a run of it done |
+| `dialogue_choice` | `owner`, `id` | Yes on a `say` question |
 
 What already exists when you start listening is not reported (e.g. loot already on the ground).
 
@@ -645,6 +745,9 @@ Used by `ui_add`, a hook's `after` and `overlay`. A program runs at draw / bake 
   (from the resolution) as it draws. [Widgets](#widgets-ui-kit) do that for you; a program's own
   `draw_*` calls and `$mba_push` entries must scale themselves, e.g. `{"$op": "*", "args": [904, {"$self":
   "ui_scale"}]}`, and draw sprites with `draw_sprite_ext` at that scale (`scr_draw_text` sizes its font itself).
+  On a 4:3, 16:10 or ultrawide screen the game also moves the menu (`self.menu_x_pos` / `menu_y_pos`, centred, and
+  while it slides in) - for what its draw script draws and for the mouse over `mba` - so a program in a menu's draw
+  needs nothing more. Something drawn over a menu from outside its draw (e.g. a GUI draw event) adds those two.
 
 **Expressions**: JSON literals (with `$asset` / `$inst`), arrays of expressions, and
 
@@ -683,7 +786,8 @@ A program that fails (bad function, bad arguments) is dropped and its error is s
 
 The game's own controls in one call each, inside any draw program (usually `ui_add`). Clicks arrive as the event
 `ui_clicked` `{owner, id, action}` (owner = the program's owner). Positions are the game's 1920×1080 layout; the
-widgets follow the game's `ui_scale` (from the resolution) like its own controls.
+widgets follow the game's `ui_scale` (from the resolution) and, on screens of other shapes, the menu's place like its
+own controls.
 
 | widget | args | actions |
 |---|---|---|
@@ -746,10 +850,17 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 | `slorm.mod{name, version, author, description}` | your row on the Mods page (call it first; in a pack optional: `lua-pack.json` fills in what it leaves out) |
 | `slorm.request{cmd = ..., ...}` | any command above → its `result` (an error raises a Lua error) |
 | `slorm.on(event, fn)` → id / `slorm.off(id)` | events: `fn(data, event)` |
-| `slorm.every(seconds, fn)` / `slorm.after(seconds, fn)` → id / `slorm.cancel(id)` | timers (at most once per frame and every 10 ms; `every(0, fn)` = about every frame) |
+| `slorm.every(seconds, fn)` / `slorm.after(seconds, fn)` → id / `slorm.cancel(id)` | timers (at most once per frame and every 10 ms; `every(0, fn)` = about every frame). Yours till you cancel them: also a skill cast's, after its run is left |
 | `slorm.get(path, root?, depth? [2])` / `slorm.set(path, value, root?)` | variables |
 | `slorm.call(fn, ...)` / `slorm.call_on(self, fn, ...)` | scripts and engine functions (result depth 2) |
 | `slorm.instances(object, vars?)` | instances |
+| `slorm.exists(inst)` | the instance (`{$inst}` or its id) is still there (no request) |
+| `slorm.on_stats(fn)` | `fn(e)` right after each refresh of the hero's stats, inside the game's: change its final stats there (`e.hero`, `e.hero_number`) |
+| `slorm.class{...}` → C / `slorm.hero{...}` → H | a custom class / a game hero's content ([CLASSES.md](CLASSES.md)) |
+| `slorm.melee(e, o)` / `slorm.projectile(e, o)` / `slorm.area(e, o)` / `slorm.anim(x, y, sprite, o)` / `slorm.knock(target, force, by)` / `slorm.debuff(target, key, seconds, value)` | the game's attack pieces for a class's cast ([CLASSES.md](CLASSES.md#skill-code)) |
+| `slorm.rank(entry)` | the played class's rank of a row (`C.rank(id)` by id) |
+| `slorm.say(lines, on_yes?)` | a dialogue in the game's box: a text, or pages (`"text"` / `{speaker, "text"}`); `on_yes`: its last page asks Yes / No |
+| `slorm.sprite(file, o?)` / `slorm.sound(file)` / `slorm.play(sound, o?)` | a sprite / sound from a file in your mod's folder; play a sound (`o.gain`, `o.pitch`, `o.loop`) |
 | `slorm.inst(id)` / `slorm.asset(name)` | `{"$inst": id}` / `{"$asset": name}` |
 | `slorm.null` | JSON null where Lua has no nil, e.g. "any" in patterns: `{ slorm.null, "abc*" }` |
 | `slorm.item_info(item)` / `slorm.slot_info(slot, hero?)` / `slorm.stat_info(stat, slot?, roll?, level?)` | game knowledge |
@@ -769,6 +880,11 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 | `slorm.display_name()` | your mod's name (as on the Mods page) |
 | `slorm.name` / `slorm.owner` / `slorm.version` | the file name / your owner (`lua:<file name>`) / SlormAPI's version |
 
+**A hero that is gone.** A request that names a hero instance that is gone (its run was left, the hero was switched)
+does nothing: `nil`, no error (the log says so once per mod). This is for a cast's late effects; check
+`slorm.exists(e.hero)` before what does not name the hero (an animation at a place, a sound, a buff with no
+`target`). Over TCP such a request returns its error marked `"hero_gone": true`.
+
 Tables become JSON: keys 1..n only (or empty) → an array, else an object. JSON `null` inside arrays becomes `nil` in
 Lua (a hole) — use your own markers ("" / -1) in data you save.
 
@@ -778,10 +894,12 @@ Lua (a hole) — use your own markers ("" / -1) in data you save.
 - Engine functions that reach outside the game are refused in `call` and in draw programs: files (`file_*`,
   `directory_*`, `ini_*`, `buffer_save` / `buffer_load`, `screen_save`, ...), network (`http_*`, `network_*`, `url_*`,
   `steam_*`), the OS (`execute_*`, `environment_*`, `os_*`, `external_*`, `shell_*`), dialogs, the clipboard, ...
-- Commands not available: `mod_enable`, `mods_page`, `perf`, `overlay`, `runner`, `routines`, `routine_index`;
-  nested batches. `set_setting` only for your own mod. Your `owner` is always `lua:<file name>` and `unhook`'s `all`
+- Commands not available: `mod_enable`, `mods_page`, `perf`, `profile`, `catch_errors`, `overlay`, `runner`, `routines`,
+  `routine_index`, `static_value`, `switch_hero`; nested batches. `set_setting` only for your own mod. Your `owner` is always `lua:<file name>` and `unhook`'s `all`
   is ignored, so a Lua mod only ever touches its own hooks, UI, events and data.
-- Each call may run 200 ms and each mod may use 64 MB; past that it stops with an error.
+- Each call may run 200 ms and each mod may use 64 MB; past that it stops with an error. An event handler, timer or
+  `on_stats` handler stopped that way is not called again (the log says so). One that fails otherwise still runs; its
+  error is logged the first time only.
 - Errors are shown on the Mods page ("Lua error: ...") and in Aurie's log; fix the file and save to reload.
 
 ---

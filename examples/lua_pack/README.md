@@ -8,3 +8,7 @@
    `<id>-<version>.zip`. Upload that to Nexus; players drag it onto Vortex's Mods page and Vortex installs it.
 
 Raise `version` for each release, and `requires["slorm.slormapi"]` when you use something from a newer SlormAPI.
+
+**A pack with art or sounds** (a custom class's PNG, OGG or WAV files): the zip holds them, but Vortex installs a
+pack's `.lua` files only. Players unzip such a zip into the game folder instead (it lands in
+`mods\lua\<id>\`); `pack.cmd` says so when it makes one.

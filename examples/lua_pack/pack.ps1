@@ -1,6 +1,9 @@
-# Zips a Lua pack for Nexus / Vortex: <id>-<version>.zip with mods/lua/<id>/lua-pack.json and its .lua files.
+# Zips a Lua pack for Nexus / Vortex: <id>-<version>.zip with mods/lua/<id>/lua-pack.json, its .lua files and its
+# other files (art, sounds).
 #   pack.cmd [folder]        (default: my_mod)
 # Checks lua-pack.json against the rules The Slormancer's Vortex extension installs by, so the zip installs as is.
+# That extension installs a pack's .lua files only: a pack with other files (a class's art or sounds) is installed by
+# hand - the zip unzipped into the game folder - and this says so.
 param([string]$Folder = 'my_mod')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
@@ -23,7 +26,8 @@ if (-not $req -or -not $req.'slorm.slormapi') { $problems += 'requires: { "slorm
 else { foreach ($p in $req.PSObject.Properties) { if ($p.Value -notmatch $ver) { $problems += "requires.$($p.Name): x.y.z" } } }
 if ($problems) { $problems | ForEach-Object { Write-Host "lua-pack.json: $_" -ForegroundColor Red }; exit 1 }
 
-$files = @(Get-ChildItem $dir -Recurse -File -Filter *.lua) + @(Get-Item (Join-Path $dir 'lua-pack.json'))
+$files = @(Get-ChildItem $dir -Recurse -File | Where-Object { $_.Extension -notin '.zip', '.dll', '.asi', '.exe' })
+$other = @($files | Where-Object { $_.Extension -ne '.lua' -and $_.Name -ne 'lua-pack.json' -and $_.Name -ne 'README.md' })
 $zip = Join-Path $PSScriptRoot "$($m.id)-$($m.version).zip"
 if (Test-Path $zip) { Remove-Item $zip }
 $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
@@ -34,4 +38,9 @@ try {
         Write-Host "  mods/lua/$($m.id)/$rel"
     }
 } finally { $archive.Dispose() }
-Write-Host "$zip - upload it to Nexus, or drag it onto Vortex's Mods page" -ForegroundColor Green
+if ($other) {
+    Write-Host "$zip - $($other.Count) file(s) besides .lua (art, sounds): Vortex installs a pack's .lua files only." -ForegroundColor Yellow
+    Write-Host "Tell players to unzip it into the game folder (The Slormancer\mods\lua\$($m.id)\) instead." -ForegroundColor Yellow
+} else {
+    Write-Host "$zip - upload it to Nexus, or drag it onto Vortex's Mods page" -ForegroundColor Green
+}

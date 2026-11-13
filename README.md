@@ -1,11 +1,13 @@
-# SlormAPI 1.0.3 — a modding API for The Slormancer
+# SlormAPI 2.0.0 — a modding API for The Slormancer
 
 ![SlormAPI](docs/banner.png)
 
 SlormAPI lets other mods (and, optionally, development tools) read and change The Slormancer while it runs: game
 variables, instances, scripts and built-in functions, script hooks, game events, and drawing with the game's own
 sprites and fonts — including buttons in the game's own menus that hover, click and slide like native ones. Mods use
-it from C++ or as **Lua mods**: one text file in `mods\lua`, loaded while the game runs.
+it from C++ or as **Lua mods**: one text file in `mods\lua`, loaded while the game runs. Mods can add **custom
+classes** (playable heroes of their own, with their own skills, upgrade tree, legacies, achievements, reapers and
+story) and give the Knight, the Huntress and the Mage new content.
 
 On its own it adds two things to the game's menus:
 - a **MODS** button next to DISCORD in the main menu and the pause menu. It lists the installed mods with their
@@ -18,11 +20,15 @@ On its own it adds two things to the game's menus:
 
 ![Options > Mods](docs/options_mods.png)
 
+It also fixes three of the game's own bugs, for every hero: the launcher's Wrath buttons stopping on a GML error,
+collision-map sprites never freed, and frame time growing run after run (the game's path table).
+
 The Mods page also warns when something is wrong: a mod whose requirements are not met ("Needs SlormAPI 1.0.0"), a
 Lua mod with an error, a mod whose game functions were not found after a game update, and a game that crashed last
 time (the button then reads MODS (!)).
 
-Example mods: `examples/lua/kill_counter.lua` here, and **[BuildFilter](https://github.com/tsotsas/BuildFilter)**, a
+Example mods: `examples/lua/kill_counter.lua` here, the classes `examples/lua/paladin.lua` (small) and
+`examples/evil_knight` (everything a class can have), and **[BuildFilter](https://github.com/tsotsas/BuildFilter)**, a
 loot filter made twice - in C++ and in Lua - with the same features.
 
 ## Requirements
@@ -31,27 +37,29 @@ loot filter made twice - in C++ and in Lua - with the same features.
   loads Aurie mods another way works as it is.
 
 ## Install
-Easiest: **`SlormAPI-Installer-1.0.3.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
+Easiest: **`SlormAPI-Installer-2.0.0.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
 it, close the game, double-click `Install.bat` and choose 1. It installs the Aurie loader (the official Aurie Core
 2.0.2 + YYToolkit 5.0.0c, checked against their release checksums) and SlormAPI, and can repair the loader after a
 game update or remove everything. When the game already loads Aurie through another mod loader (a `version.dll`
 loader), it keeps that loader and adds only the mod.
 
-Manually (`SlormAPI-1.0.3.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
+Manually (`SlormAPI-2.0.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
 1. Have Aurie + YYToolkit for The Slormancer (https://github.com/AurieFramework/Aurie,
    https://github.com/AurieFramework/YYToolkit), or a game where Aurie mods already load.
 2. Unzip it into `<The Slormancer folder>`.
 
-With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-1.0.3.zip` in
+With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-2.0.0.zip` in
 Vortex like any other mod (it goes to `mods/Aurie`). Don't use the installer then. If you used it before, run it once
 more and choose 4: the Vortex loader setup needs the original game exe back. Mods that Vortex deployed show "Switched
 on / off in Vortex" on the Mods page.
 
-Uninstall: delete `SlormAPI.dll` (or installer > 4). SlormAPI never writes your save files.
+Uninstall: delete `SlormAPI.dll` (or installer > 4). SlormAPI never writes your save files: the game's save stays a
+normal three-hero save, and a custom class's progress is kept apart, in `mods/aurie/SlormAPI/data/classes.json`.
 
 ## For mod authors
 **Full reference: [docs/API.md](docs/API.md)** — every command, event, draw program, widget and Lua function in
-detail, the item format, a game cheat sheet, and how to start a C++ or Lua mod. The short version:
+detail, the item format, a game cheat sheet, and how to start a C++ or Lua mod. Custom classes and hero content:
+**[docs/CLASSES.md](docs/CLASSES.md)**. The short version:
 
 Copy `source/SlormAPI_Interface.hpp` into your Aurie module and get the interface (modules can load in any order, so ask
 for it from a game callback, not in `ModuleInitialize`):
@@ -136,7 +144,7 @@ frame, right after they happened, on the game thread.
 | `cooldown_started` | `skill`, `name`, `hero`, `cooldown` |
 | `stats_refreshed` | `hero` (the hero's stats were recalculated) |
 | `hero_died` | – (once per death) |
-| `level_up` | `level`, `previous`, `hero` (0 Knight, 1 Huntress, 2 Mage) |
+| `level_up` | `level`, `previous`, `hero` (0 Knight, 1 Huntress, 2 Mage, 3+ a class) |
 | `room_changed` | `room`, `previous` |
 | `menu_changed` | `menu`, `previous` (`obj_ui_next_gen.menu_show`: none, main, inventory, ...) |
 | `skill_cast` | `skill`, `name`, `hero` |
@@ -145,6 +153,11 @@ frame, right after they happened, on the game thread.
 | `run_started` / `run_ended` | – |
 | `setting_changed` | `mod`, `key`, `value` |
 | `ui_clicked` | `owner`, `id`, `action` (a click on one of your widgets) |
+| `class_cast` / `class_hit` | a custom class's own skill cast / each of its hits ([CLASSES.md](docs/CLASSES.md#skill-code)) |
+| `legacy_used` | a class's or game hero's own activable legacy used |
+| `class_achievement` | `class`, `id`, `step`, `steps` (an own achievement's new step) |
+| `mission_started` / `mission_done` | `class`, `mission`, `ref`, + `runs` (an own story mission) |
+| `dialogue_choice` | `owner`, `id` (Yes on a `say` question) |
 
 C++:
 
@@ -175,7 +188,8 @@ Its `name`, `author` and `description` show on the Mods page (no `slorm.mod{}` n
 files are named after the `id`.
 
 **Starting a new one:** copy `examples/lua_pack/` - a pack ready to rename, with `pack.cmd`, which checks
-`lua-pack.json` and makes the zip for Nexus / Vortex.
+`lua-pack.json` and makes the zip for Nexus / Vortex. Vortex installs a pack's `.lua` files only: a pack with art or
+sound files (a custom class's) is unzipped into the game folder by hand.
 
 ```lua
 slorm.mod{ name = "Kill Counter", version = "1.0", author = "me", description = "Counts your kills" }
@@ -190,8 +204,13 @@ end)
 |---|---|
 | `slorm.mod{name, version, author, description}` | your mod's line on the Mods page |
 | `slorm.on(event, fn)` / `slorm.off(id)` | game events (the table under Events); `fn(data, event)` |
-| `slorm.every(seconds, fn)` / `slorm.after(seconds, fn)` / `slorm.cancel(id)` | timers |
-| `slorm.get(path, root?)` / `slorm.set(path, value, root?)` / `slorm.call(fn, ...)` / `slorm.instances(object, vars?)` | the game's variables, scripts and instances |
+| `slorm.every(seconds, fn)` / `slorm.after(seconds, fn)` / `slorm.cancel(id)` | timers (yours till you cancel them: also a cast's, after its run is left) |
+| `slorm.on_stats(fn)` | `fn(e)` right after each refresh of the hero's stats, inside the game's - change its final stats there (`e.hero`, `e.hero_number`) |
+| `slorm.get(path, root?)` / `slorm.set(path, value, root?)` / `slorm.call(fn, ...)` / `slorm.instances(object, vars?)` | the game's variables, scripts and instances (on a hero that is gone - e.g. a cast's, its run left: `nil`, nothing done, no error; said once in the log) |
+| `slorm.exists(inst)` | the instance (`{$inst}` or its id) still there |
+| `slorm.class{...}` / `slorm.hero{...}` | a custom class / content for the Knight, the Huntress or the Mage ([CLASSES.md](docs/CLASSES.md)) |
+| `slorm.melee` / `projectile` / `area` / `anim` / `knock` / `debuff` | the game's attack pieces for a class's own skills |
+| `slorm.say(lines, on_yes?)` / `slorm.sprite(file)` / `slorm.sound(file)` / `slorm.play(sound)` | a dialogue in the game's box / art and sounds from your mod's folder |
 | `slorm.settings{...}` / `slorm.setting(key)` | your settings in Options > Mods (as `register_settings`) |
 | `slorm.ui(menu, calls)` / `slorm.ui_remove(menu)` | your widgets in a menu; `slorm.text`, `slorm.button`, `slorm.radio`, `slorm.selector` make them |
 | `slorm.on_click(function(id, action) ... end)` | clicks on your widgets |
@@ -206,7 +225,9 @@ end)
 | `slorm.log(...)` / `print(...)` | a line in Aurie's log |
 
 A call that runs longer than 200 ms is stopped (no frozen game), and an error is shown on the Mods page ("! Lua error:
-...") and in the log; fix the file and save to reload it. SlormAPI embeds Lua 5.5.1 (MIT license; its source is in `third_party/lua`).
+...") and in the log; fix the file and save to reload it. An event handler, timer or `on_stats` handler stopped that way
+is not called again (it would stall the game each time; the log says so). One that fails otherwise still runs; its
+error is logged the first time only. SlormAPI embeds Lua 5.5.1 (MIT license; its source is in `third_party/lua`).
 
 **What a Lua mod cannot do** (a Lua mod is a text file anyone can read before installing it, but it should still not
 be able to harm your PC):
@@ -241,8 +262,8 @@ tooltip, and their clicks come back as the `ui_clicked` event:
 | `$selector` | `id, x, y, label, value, tooltip?` (the game's ◀ value ▶ box) | `prev`, `next` |
 | `$text` | `x, y, text, font?, color?, halign?` (fonts by name, e.g. `ft_standard_12`) | – |
 
-Positions are the game's 1920×1080 layout; widgets follow the game's `ui_scale` (from the resolution) like its own
-controls.
+Positions are the game's 1920×1080 layout; widgets follow the game's `ui_scale` (from the resolution) and, on 4:3,
+16:10 or ultrawide screens, the menu's place like its own controls.
 
 Your program runs every time the game draws that menu, so values in it can come from game variables (`{"$global":
 ...}`) or from your own state: change it with `ui_add` again (or `ui_refresh` if it reads game variables). Widgets
@@ -267,6 +288,28 @@ They never reach a save file: the game saves each one as an Epic with the same s
 after loading. Removing the mod leaves an ordinary Epic, and the player is asked before playing such a save (Load
 anyway / Back). Details: [docs/API.md](docs/API.md#custom-legendaries);
 a complete example: `examples/lua/legendary_windrunner.lua`.
+
+## Custom classes
+A mod can add a playable class: a hero of its own (hero 3, 4, ...) on the Knight's, the Huntress's or the Mage's body
+and skill layout, or on nothing. It has its own level, gear, reapers, skill ranks, legacies and save data, and its
+citizen in the hub switches to it. Everything else is optional:
+- its own skills in Lua (the game casts them; your code makes the attacks with the game's own pieces);
+- its upgrade tree, specializations and mechanic;
+- its art and skins, its hero's sounds;
+- its Ancestral Legacy tree (stat legacies, keystones, auras, actives);
+- achievements in its own Profile category (never on Steam);
+- its versions of reapers, its legendaries;
+- story missions and a story area of its own.
+
+```lua
+local C = slorm.class{ id = "paladin", name = "Paladin", title = "The Paladin", base = 0,
+  talk = "Shall the Paladin take over?", skills = { [3] = { name = "Holy Swing" } } }
+```
+
+The game's three heroes can get the same content (art, skins, reapers, sounds, achievements, missions, legacies) with
+`slorm.hero{hero = "knight", ...}`; several mods' content is merged. The game's own save stays a normal three-hero save.
+Everything about it: **[docs/CLASSES.md](docs/CLASSES.md)**; examples: `examples/lua/paladin.lua`,
+`examples/evil_knight`.
 
 ## Mod settings
 Describe your settings once (e.g. when your mod starts); SlormAPI shows them in Options > Mods, saves the values in
