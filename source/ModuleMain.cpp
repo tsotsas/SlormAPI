@@ -115,7 +115,7 @@ static double MicrosSinceStart()
 	return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - g_StartTime).count();
 }
 static constexpr uint16_t kDefaultPort = 47950;
-static constexpr const char* kVersion = "2.0.0";
+static constexpr const char* kVersion = "2.1.0";
 
 [[noreturn]] static void Fail(const std::string& Msg) { throw std::runtime_error(Msg); }
 
@@ -3224,7 +3224,7 @@ namespace events
 	const std::vector<ScriptEvent>& ScriptEvents()
 	{
 		static const std::vector<ScriptEvent> list = {
-			{ "enemy_killed", "scr_hero_stats_on_kill", 0, { "enemy_level" } },   // self = the enemy, arg 0 = loot profile
+			{ "enemy_killed", "scr_hero_stats_on_kill", 0, { "enemy_level", "slormapi_enemy" } },   // self = the enemy, arg 0 = loot profile
 			{ "hero_hit", "scr_hero_proc_when_hit", 0, { "the_health", "final_the_max_health", "the_shield", "the_max_shield" } },   // damage, attacker
 			{ "hero_died", "scr_hero_dead", 0, {} },
 			{ "item_picked_up", "scr_pick_up_item", 3, {} },                     // arg 0 = the items, result = picked
@@ -3242,6 +3242,7 @@ namespace events
 	const char* const kWatched[] = { "loot_dropped", "gold_changed", "level_up", "item_equipped", "room_changed", "menu_changed",
 		"status_removed" };
 	const char* const kDirect[] = { "setting_changed", "boss_killed", "ui_clicked",   // from commands (g_DirectEvents) or other events
+		"enemy_spawned", "enemy_attack",                                              // a custom enemy placed / its own attack
 		"class_cast", "class_hit",                                                    // a custom class's skills (kit "own")
 		"legacy_used",                                                                // ... and its activable legacies
 		"class_achievement",                                                          // ... and its achievements' steps
@@ -3547,6 +3548,7 @@ namespace events
 				if (const Json* y = e.Self.Find("$y")) d.Add("y", *y);
 				d.Add("level", var("enemy_level"));
 				d.Add("profile", arg(0));                 // trash / good / elite / boss
+				if (Json id = var("slormapi_enemy"); id.type == Json::Str && !id.s.empty()) d.Add("id", id.s);   // a custom enemy
 				if (gd::Str(arg(0)) == "boss") Emit(Out, "boss_killed", d);
 				Emit(Out, "enemy_killed", std::move(d));
 			}
@@ -10689,11 +10691,49 @@ static Json CmdContentRow(const Json& Req)
 	return Json();
 }
 
-// {"file": path, "frames": n, "xorig", "yorig", "like": sprite} -> a sprite from an image (PNG / GIF / JPG; frames side by
-// side: "frames", else as many as the "like" sprite's width fits, else 1), made once per file version and options. Its origin:
-// xorig / yorig, else the "like" sprite's, else its middle. The path: relative to the asking Lua mod's folder (others:
-// to mods/), and inside mods/.
-// a mod's file ("file", relative to "dir" - a Lua mod's folder - else to mods/): inside mods/, one of Exts, existing
+// A data file: a mod's image or sound carried as "<file>.lua" (Vortex installs a Lua pack's .lua files only; the pack tool
+// examples/lua_pack/pack.ps1 makes them): a comment, then return "<the file in base64>". Never run: it is decoded once per
+// version to mods/aurie/SlormAPI/files/<its path under mods/>, and that copy is the file.
+static fs::path FromDataFile(const fs::path& Data, const std::string& Rel)
+{
+	static std::map<std::string, std::pair<long long, fs::path>> done;   // data file -> its time when decoded, the copy
+	std::error_code ec;
+	long long stamp = fs::last_write_time(Data, ec).time_since_epoch().count();
+	fs::path out = AurieDir() / "SlormAPI" / "files" / fs::path(Rel);
+	if (auto it = done.find(Data.string()); it != done.end() && it->second.first == stamp && fs::is_regular_file(out, ec))
+		return out;
+	auto size = fs::file_size(Data, ec);
+	if (ec) Fail(Rel + ".lua: could not be read (" + ec.message() + ")");
+	if (size > (64u << 20)) Fail(Rel + ".lua: a data file is up to 64 MB");
+	std::ifstream in(Data, std::ios::binary);
+	std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	size_t q = s.find("return \"");                          // (the data: from just after the quote to the next one)
+	size_t e = q == std::string::npos ? q : s.find('"', q + 8);
+	if (e == std::string::npos) Fail(Rel + ".lua is not a data file (return \"<base64>\"; pack.ps1 makes them)");
+	std::string bytes = gd::Base64Decode(s.substr(q + 8, e - q - 8));
+	if (bytes.empty()) Fail(Rel + ".lua holds no data");
+	std::string old;
+	if (fs::file_size(out, ec) == bytes.size() && !ec)
+		if (std::ifstream o(out, std::ios::binary); o) old.assign(std::istreambuf_iterator<char>(o), std::istreambuf_iterator<char>());
+	if (old != bytes)                                        // (unchanged: kept, so its sprite / sound is not made again)
+	{
+		fs::create_directories(out.parent_path(), ec);
+		fs::path tmp = out;
+		tmp += ".tmp";
+		{
+			std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+			o.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+			if (!o) Fail("could not write SlormAPI/files/" + Rel);
+		}
+		fs::rename(tmp, out, ec);
+		if (ec) { fs::remove(tmp, ec); Fail("could not write SlormAPI/files/" + Rel + " (in use?)"); }
+	}
+	done[Data.string()] = { stamp, out };
+	return out;
+}
+
+// a mod's file ("file", relative to "dir" - a Lua mod's folder - else to mods/): inside mods/, one of Exts, existing -
+// the file itself, else its data file "<file>.lua"
 static fs::path ModFile(const Json& Req, std::initializer_list<const char*> Exts, const char* What, std::string& Rel, std::string& Ext)
 {
 	std::string file = Req.GetStr("file");
@@ -10710,10 +10750,23 @@ static fs::path ModFile(const Json& Req, std::initializer_list<const char*> Exts
 	std::string list;
 	for (const char* e : Exts) { known |= Ext == e; list += (list.empty() ? "" : ", ") + std::string(e); }
 	if (!known) Fail(std::string("a ") + What + " file is one of " + list);
-	if (!fs::is_regular_file(path, ec)) Fail("no file " + Rel);
-	return path;
+	fs::path data = path;
+	data += ".lua";
+	bool plain = fs::is_regular_file(path, ec), packed = fs::is_regular_file(data, ec);
+	if (plain && packed)                                      // both: the newer (an old file left next to an update's)
+	{
+		auto ft = fs::last_write_time(path, ec), dt = fs::last_write_time(data, ec);
+		if (!ec && dt > ft) return FromDataFile(data, Rel);
+	}
+	if (plain) return path;
+	if (!packed) Fail("no file " + Rel);
+	return FromDataFile(data, Rel);
 }
 
+// {"file": path, "frames": n, "xorig", "yorig", "like": sprite} -> a sprite from an image (PNG / GIF / JPG; frames side by
+// side: "frames", else as many as the "like" sprite's width fits, else 1), made once per file version and options. Its origin:
+// xorig / yorig, else the "like" sprite's, else its middle. The path: relative to the asking Lua mod's folder (others:
+// to mods/), and inside mods/; the file or its data file (FromDataFile).
 static Json CmdSpriteFile(const Json& Req)
 {
 	static std::map<std::string, int> made;
@@ -10888,6 +10941,621 @@ static Json CmdLegendariesWaiting()
 	return out;
 }
 
+// ============================================================================
+// Custom enemies (register_enemy / slorm.enemy): a mod's enemy on a game enemy's body - its own name, stats (x its
+// base's), size, colour, art and loot. It replaces a share of the enemies a run places (spawn rule), or spawn_enemy
+// places one. Underneath it stays its base: the same object, AI and attacks. Live enemies keep a mark (kMark).
+// ============================================================================
+namespace enemies
+{
+	constexpr const char* kOwner = "SlormAPI.enemies";
+	constexpr const char* kMark = "slormapi_enemy";              // instance variable: its key
+
+	struct Def
+	{
+		std::string Owner, Local, Key;                           // Key = owner:id
+		int Base = -1;                                           // its base's object
+		std::vector<std::pair<std::string, double>> Mult;        // instance variable -> x (after scr_AI_load_stats)
+		double Scale = 1;
+		int Color = -1;                                          // a tint (image_blend, GameMaker's BGR), -1: none
+		std::map<int, int> Art;                                  // game sprite -> its sprite
+		std::string Loot;
+		Json Name;                                               // a text, or one per language
+		double Chance = 0;
+		bool Any = false;
+		std::set<int> Replaces;                                  // objects it replaces (Any: every enemy's)
+		double BossChance = 0;                                   // its chance to be a Battlefield boss floor's boss
+		bool OwnAttack = false;                                  // its Lua does its attack (enemy_attack) instead of its base's
+	};
+	std::vector<Def> Defs;
+
+	// its stats: option -> the instance variables scr_AI_load_stats sets from the enemy table (at the enemy's level)
+	const std::vector<std::pair<const char*, std::vector<const char*>>>& StatVars()
+	{
+		static const std::vector<std::pair<const char*, std::vector<const char*>>> list = {
+			{ "health", { "the_max_health" } },
+			{ "damage", { "min_basic_damage", "max_basic_damage", "min_elemental_damage", "max_elemental_damage" } },
+			{ "speed", { "the_speed" } }, { "res_phy", { "res_phy" } }, { "res_mag", { "res_mag" } },
+			{ "cooldown", { "cooldown" } }, { "attack_range", { "attack_range" } }, { "precision", { "precision" } },
+			{ "dodge", { "dodge" } }, { "crit_chance", { "crit_chance" } }, { "knockback_weight", { "knockback_weight" } },
+			{ "knockback_force", { "knockback_force" } } };
+		return list;
+	}
+	// the sprite variables of an enemy (its poses in each look: elite, spectral, warlord)
+	const char* const kSpriteVars[] = { "base_animation_sprite", "base_animation_sprite_elite", "base_animation_sprite_spectral",
+		"base_animation_sprite_wl", "idle_animation_sprite", "idle_animation_sprite_elite", "idle_animation_sprite_spectral",
+		"idle_animation_sprite_wl", "cast_pose", "cast_pose_elite", "cast_pose_spectral", "cast_pose_wl", "precast_pose",
+		"precast_pose_elite", "precast_pose_spectral", "precast_pose_wl", "create_animation_sprite", "create_animation_sprite_elite",
+		"create_animation_sprite_sprite", "death_animation_sprite", "death_animation_sprite_alt", "death_animation_sprite_darkness",
+		"death_animation_sprite_fire", "death_animation_sprite_ice", "death_animation_sprite_sacred", "death_animation_sprite_thunder",
+		"recast_sprite", "weapon_sprite", "weapon_sprite_spectral", "weapon_sprite_wl", "shadow_sprite", "my_pal_sprite" };
+
+	Def* ByKey(const std::string& Key)
+	{
+		for (auto& d : Defs) if (d.Key == Key) return &d;
+		return nullptr;
+	}
+
+	// the game's enemy objects (children of obj_parent_enemy_NL), friendly ones apart
+	const std::vector<bool>& EnemyObjects()
+	{
+		static std::vector<bool> is;
+		if (!is.empty()) return is;
+		RValue parent = AssetIndex("obj_parent_enemy_NL");
+		for (int i = 0; g_Yytk->CallBuiltin("object_exists", { RValue(static_cast<double>(i)) }).ToBoolean(); ++i)
+		{
+			RValue name = g_Yytk->CallBuiltin("object_get_name", { RValue(static_cast<double>(i)) });
+			bool friendly = KindOf(name) == VALUE_STRING && name.ToString().ends_with("_friendly");
+			is.push_back(!friendly && g_Yytk->CallBuiltin("object_is_ancestor", { RValue(static_cast<double>(i)), parent }).ToBoolean());
+		}
+		return is;
+	}
+	bool IsEnemy(int Obj) { auto& e = EnemyObjects(); return Obj >= 0 && Obj < static_cast<int>(e.size()) && e[static_cast<size_t>(Obj)]; }
+
+	int AssetOr(const std::string& Name);
+	std::string ObjName(int Obj)
+	{
+		RValue n = g_Yytk->CallBuiltin("object_get_name", { RValue(static_cast<double>(Obj)) });
+		return KindOf(n) == VALUE_STRING ? n.ToString() : "";
+	}
+	// a game enemy: its object ("obj_soldier"), its name in the enemy table ("Soldier", "zombie peasant") or its number
+	// there -> its object
+	int Resolve(const Json& V)
+	{
+		static const std::map<std::string, std::string> renamed = { { "zombie peasant", "obj_peasant" },
+			{ "soul", "obj_suffering_soul" }, { "siege leader", "obj_leader" } };
+		std::string name;
+		if (V.type == Json::Num)
+		{
+			RValue* table = FindMember(GlobalRValue(), "table_enemies");
+			RValue* row = table ? ArrayAt(*table, static_cast<size_t>(V.n)) : nullptr;
+			RValue* ref = row ? ArrayAt(*row, 1) : nullptr;
+			if (!ref || KindOf(*ref) != VALUE_STRING) Fail("no enemy " + sj::Dump(V) + " in the enemy table");
+			name = ref->ToString();
+		}
+		else if (V.type == Json::Str) name = V.s;
+		else Fail("a game enemy: its object (\"obj_soldier\"), name (\"Soldier\") or number in the enemy table");
+		std::string low = Lower(name), obj = low;
+		if (!low.starts_with("obj_"))
+		{
+			auto r = renamed.find(low);
+			obj = r != renamed.end() ? r->second : "obj_" + low;
+			for (char& c : obj) if (c == ' ' || c == '-') c = '_';
+		}
+		int o = AssetOr(obj);
+		if (!IsEnemy(o)) Fail("'" + name + "' is not one of the game's enemies");
+		return o;
+	}
+
+	// an instance value (an object, or a ref / id as instance_create returns it) -> the instance, nullptr for none
+	// (noone, gone, deactivated). Never throws: it runs inside the game's scripts (PreAttack's target, PostCreate)
+	CInstance* InstOf(const RValue& V)
+	{
+		if (KindOf(V) == VALUE_OBJECT) return V.ToInstance();
+		if (KindOf(V) != VALUE_REF && !IsNumeric(V)) return nullptr;
+		int64_t id = V.ToInt64();
+		CInstance* inst = nullptr;
+		return id >= 0 && id <= INT32_MAX && AurieSuccess(g_Yytk->GetInstanceObject(static_cast<int32_t>(id), inst)) ? inst : nullptr;
+	}
+	// an asset's index, -1 for an unknown name
+	int AssetOr(const std::string& Name)
+	{
+		try { RValue i = AssetIndex(Name); return IsNumeric(i) ? static_cast<int>(i.ToDouble()) : -1; }
+		catch (const std::exception&) { return -1; }
+	}
+
+	int ObjectOf(CInstance* Inst)
+	{
+		RValue idx;
+		return AurieSuccess(g_Yytk->GetBuiltin("object_index", Inst, NULL_INDEX, idx)) && IsNumeric(idx) ? static_cast<int>(idx.ToDouble()) : -1;
+	}
+	std::string MarkOf(CInstance* Inst)
+	{
+		RValue* m = Inst ? FindMember(RValue(Inst), kMark) : nullptr;
+		return m && KindOf(*m) == VALUE_STRING ? m->ToString() : "";
+	}
+	const Def* DefOf(CInstance* Inst)
+	{
+		std::string mark = MarkOf(Inst);
+		return mark.empty() ? nullptr : ByKey(mark);
+	}
+
+	// ---- placing: the run's enemy placement (SpawnDepth) asks instance_create for an enemy; a rule that hits swaps the
+	// object for its enemy's base, and the new instance's scr_AI_load_stats (in its Create) marks it
+	int SpawnDepth = 0, BossDepth = 0;
+	struct Making { RValue Swap; RValue* Old = nullptr; size_t Def = SIZE_MAX; bool Marked = false, Boss = false; };
+	std::deque<Making> Makes;                                    // one per instance_create running (a deque: a nested
+	                                                             // one keeps the outer one's swapped value where it is)
+	const Def* Forced = nullptr;                                 // spawn_enemy's
+	bool ForcedMarked = false;
+	std::mt19937 Rng{ std::random_device{}() };
+
+	size_t Roll(int Obj)
+	{
+		std::uniform_real_distribution<double> u(0.0, 1.0);
+		for (size_t i = 0; i < Defs.size(); ++i)
+		{
+			const Def& d = Defs[i];
+			if (d.Chance <= 0 || !(d.Any || d.Replaces.count(Obj))) continue;
+			if (u(Rng) < d.Chance) return i;
+		}
+		return SIZE_MAX;
+	}
+
+	// ---- the Battlefield's boss: on a boss floor scr_procedural_battlefield_boss_create (as obj_procedural) makes it with
+	// instance_create - one of the game's enemies - then makes it a champion and names it (boss_name). A boss rule swaps
+	// that object; once the script is done its boss_name is its enemy's name. A Warlord's floor keeps the game's.
+	bool WarlordFloor = false, BossRolled = false;          // (the script's first enemy is its boss)
+	int64_t BossMade = -1;                                       // the custom boss just made
+	size_t BossDef = SIZE_MAX;
+	size_t RollBoss()
+	{
+		std::uniform_real_distribution<double> u(0.0, 1.0);
+		for (size_t i = 0; i < Defs.size(); ++i)
+			if (Defs[i].BossChance > 0 && u(Rng) < Defs[i].BossChance) return i;
+		return SIZE_MAX;
+	}
+	void SizeAsElite(CInstance* Inst, double Scale);
+	bool PreBoss(CInstance* Self, int, RValue**, RValue&)
+	{
+		++BossDepth;
+		BossMade = -1;
+		BossRolled = false;
+		RValue* w = Self ? FindMember(RValue(Self), "warlord_boss_floor") : nullptr;
+		WarlordFloor = w && w->ToBoolean();
+		return false;
+	}
+	void PostBoss(CInstance*, int, RValue**, RValue&)
+	{
+		if (BossDepth > 0) --BossDepth;
+		if (BossMade < 0 || BossDef >= Defs.size()) return;
+		const Def& d = Defs[BossDef];
+		std::string name = classes::LangText(&d.Name, classes::CurrentLang());
+		CInstance* inst = nullptr;                               // (not InstanceById: it throws when gone)
+		if (AurieSuccess(g_Yytk->GetInstanceObject(static_cast<int32_t>(BossMade), inst)) && inst)
+		{
+			if (d.Scale != 1) SizeAsElite(inst, d.Scale);        // (the champion: an elite's size, then its own)
+			if (!name.empty()) g_Yytk->CallBuiltin("variable_instance_set", { RValue(inst), RValue("boss_name"), RStr(name) });
+		}
+		BossMade = -1;
+	}
+
+	bool PreCreate(CInstance*, int ArgCount, RValue** Args, RValue&)
+	{
+		Making m;
+		if (!Defs.empty() && (SpawnDepth > 0 || BossDepth > 0) && ArgCount >= 3 && Args[2] && IsNumeric(*Args[2]))
+			if (int obj = static_cast<int>(Args[2]->ToDouble()); IsEnemy(obj))
+			{
+				if (BossDepth > 0) { if (!WarlordFloor && !BossRolled) { m.Def = RollBoss(); m.Boss = true; } BossRolled = true; }
+				else m.Def = Roll(obj);
+			}
+		Makes.push_back(std::move(m));
+		Making& top = Makes.back();
+		if (top.Def != SIZE_MAX)                                 // (the pointer swapped, not the caller's value)
+		{
+			top.Swap = RValue(static_cast<double>(Defs[top.Def].Base));
+			top.Old = Args[2];
+			Args[2] = &top.Swap;
+		}
+		return false;
+	}
+
+	void Finish(CInstance* Inst, const Def& D, bool Boss = false);
+	void PostCreate(CInstance*, int ArgCount, RValue** Args, RValue& Result)
+	{
+		if (Makes.empty()) return;
+		Making m = std::move(Makes.back());
+		Makes.pop_back();
+		if (m.Old && ArgCount >= 3) Args[2] = m.Old;
+		if (!m.Marked || m.Def >= Defs.size()) return;
+		CInstance* inst = InstOf(Result);
+		if (!inst) return;
+		if (m.Boss) { BossMade = InstanceId(inst); BossDef = m.Def; }
+		Finish(inst, Defs[m.Def], m.Boss);
+	}
+
+	// its stats on the values scr_AI_load_stats just set (at the enemy's level; again each time it runs)
+	void ApplyStats(CInstance* Inst, const Def& D)
+	{
+		RValue self(Inst);
+		for (auto& [var, x] : D.Mult)
+			if (RValue* v = FindMember(self, var); v && IsNumeric(*v)) *v = RValue(v->ToDouble() * x);
+		if (!D.Loot.empty())
+			if (RValue* v = FindMember(self, "loot_profile")) *v = RStr(D.Loot);
+	}
+
+	void PostLoadStats(CInstance* Self, int, RValue**, RValue&)
+	{
+		if (!Self) return;
+		std::string mark = MarkOf(Self);
+		if (!mark.empty())                                       // loaded again (a level change): its stats again
+		{
+			if (const Def* d = ByKey(mark)) ApplyStats(Self, *d);
+			return;
+		}
+		int obj = ObjectOf(Self);
+		const Def* d = nullptr;
+		if (Forced && !ForcedMarked && obj == Forced->Base) { d = Forced; ForcedMarked = true; }
+		else if (!Makes.empty() && Makes.back().Def < Defs.size() && !Makes.back().Marked && obj == Defs[Makes.back().Def].Base)
+		{
+			d = &Defs[Makes.back().Def];
+			Makes.back().Marked = true;
+		}
+		if (!d) return;
+		g_Yytk->CallBuiltin("variable_instance_set", { RValue(Self), RValue(kMark), RStr(d->Key) });
+		ApplyStats(Self, *d);
+	}
+
+	// its size: x the game's for it (scale_default, 0 until its first Step, which then takes |image_xscale|). An elite's
+	// (a champion's too) is the game's elite size, given only while scale_default is still 0 - and the script that made
+	// it makes it one after instance_create: so an elite's goes back to 0 (scr_AI_elite_affix_create, PostBoss), kSize
+	// keeps its scale, and scr_AI_elite_affix_step (each Step of an elite) applies it once the game's size is there
+	constexpr const char* kSize = "slormapi_size";
+	double NumVar(CInstance* Inst, const char* Name)
+	{
+		RValue* v = FindMember(RValue(Inst), Name);
+		return v && IsNumeric(*v) ? v->ToDouble() : 0;
+	}
+	void ApplyScale(CInstance* Inst, double Scale)
+	{
+		RValue* v = FindMember(RValue(Inst), "scale_default");
+		if (!v || !IsNumeric(*v)) return;
+		double now = v->ToDouble();
+		if (now == 0) { double x = std::fabs(NumVar(Inst, "image_xscale")); now = x > 0 ? x : 1; }
+		*v = RValue(now * Scale);
+	}
+	void SizeAsElite(CInstance* Inst, double Scale)   // (its size after the game's elite one; once)
+	{
+		if (NumVar(Inst, kSize) != 0) return;            // (waiting, or done: -1)
+		g_Yytk->CallBuiltin("variable_instance_set", { RValue(Inst), RValue("scale_default"), RValue(0.0) });
+		g_Yytk->CallBuiltin("variable_instance_set", { RValue(Inst), RValue(kSize), RValue(Scale) });
+	}
+	void PostEliteAffix(CInstance* Self, int, RValue**, RValue&)
+	{
+		if (!Self) return;
+		if (const Def* d = DefOf(Self); d && d->Scale != 1) SizeAsElite(Self, d->Scale);
+	}
+	void PostEliteStep(CInstance* Self, int, RValue**, RValue&)
+	{
+		if (!Self) return;
+		double size = NumVar(Self, kSize);
+		if (size <= 0 || NumVar(Self, "scale_default") == 0) return;   // (none, or the game's not there yet)
+		ApplyScale(Self, size);
+		g_Yytk->CallBuiltin("variable_instance_set", { RValue(Self), RValue(kSize), RValue(-1.0) });   // (done)
+	}
+
+	// after its Create: its size, colour and art; enemy_spawned
+	void Finish(CInstance* Inst, const Def& D, bool Boss)
+	{
+		RValue self(Inst);
+		if (D.Scale != 1)
+		{
+			if (NumVar(Inst, "elite") != 0) SizeAsElite(Inst, D.Scale);
+			else if (NumVar(Inst, kSize) == 0) ApplyScale(Inst, D.Scale);
+		}
+		if (D.Color >= 0)
+			g_Yytk->CallBuiltin("variable_instance_set", { self, RValue("image_blend"), RValue(static_cast<double>(D.Color)) });
+		if (!D.Art.empty())
+		{
+			auto look = [&](int S) { auto it = D.Art.find(S); return it != D.Art.end() ? it->second : S; };
+			for (const char* name : kSpriteVars)
+				if (RValue* v = FindMember(self, name); v && IsNumeric(*v))
+					if (int now = static_cast<int>(v->ToDouble()), want = look(now); want != now) *v = RValue(static_cast<double>(want));
+			RValue spr = g_Yytk->CallBuiltin("variable_instance_get", { self, RValue("sprite_index") });
+			if (IsNumeric(spr))
+				if (int now = static_cast<int>(spr.ToDouble()), want = look(now); want != now)
+					g_Yytk->CallBuiltin("variable_instance_set", { self, RValue("sprite_index"), RValue(static_cast<double>(want)) });
+		}
+		Json d = Json::Object();
+		d.Add("enemy", InstanceStub(Inst));
+		d.Add("id", D.Key);
+		for (const char* v : { "x", "y" })
+		{
+			RValue x = g_Yytk->CallBuiltin("variable_instance_get", { self, RValue(v) });
+			if (IsNumeric(x)) d.Add(v, x.ToDouble());
+		}
+		if (RValue* lv = FindMember(self, "enemy_level"); lv && IsNumeric(*lv)) d.Add("level", lv->ToDouble());
+		if (Boss) d.Add("boss", true);
+		g_DirectEvents.emplace_back("enemy_spawned", std::move(d));
+	}
+
+	// ---- its own attack: its base's attack script (scr_AI_attack_<name>, called by scr_AI_state_attack when it strikes)
+	// does not run for it; enemy_attack goes to its mod instead
+	std::vector<std::string> AttackScripts(int Obj)
+	{
+		static const std::map<std::string, std::string> renamed = { { "hex_shroud", "shroud" }, { "suffering_soul", "soul" },
+			{ "pudding_hermit", "hermit" }, { "alarin_clone", "boss_alarin_duplicate" } };
+		std::string name = ObjName(Obj);
+		name = name.starts_with("obj_") ? name.substr(4) : "";
+		if (auto r = renamed.find(name); r != renamed.end()) name = r->second;
+		std::vector<std::string> out;
+		for (const std::string& sc : { "scr_AI_attack_" + name, "scr_AI_attack_" + name + "_elite" })
+			if (AssetOr(sc) >= 0) out.push_back(sc);
+		return out;
+	}
+	uint64_t Frame = 0;                                          // (Tick's count)
+	std::map<int64_t, uint64_t> AttackAt;                        // enemy -> the frame its attack script last ran
+	bool PreAttack(CInstance* Self, int ArgCount, RValue** Args, RValue& Result)
+	{
+		if (!Self || Defs.empty()) return false;
+		const Def* d = DefOf(Self);
+		if (!d || !d->OwnAttack) return false;
+		Result = RValue(true);                                   // (as the game's attack scripts answer)
+		int64_t id = InstanceId(Self);
+		auto at = AttackAt.find(id);
+		bool going = at != AttackAt.end() && at->second + 1 >= Frame;
+		if (AttackAt.size() > 4096) AttackAt.clear();
+		AttackAt[id] = Frame;
+		if (going) return true;                                  // (an attack the game runs each frame: one event)
+		RValue self(Self);
+		auto num = [&](const RValue& Of, const char* V) { RValue x = g_Yytk->CallBuiltin("variable_instance_get", { Of, RValue(V) }); return IsNumeric(x) ? x.ToDouble() : 0.0; };
+		Json e = Json::Object();
+		e.Add("enemy", InstanceStub(Self));
+		e.Add("id", d->Key);
+		e.Add("element", ArgCount > 0 && Args[0] && KindOf(*Args[0]) == VALUE_STRING ? Args[0]->ToString() : std::string("none"));
+		double x = num(self, "x"), y = num(self, "y");
+		e.Add("x", x);
+		e.Add("y", y);
+		e.Add("facing", num(self, "image_xscale") < 0 ? -1.0 : 1.0);
+		if (RValue* lv = FindMember(self, "enemy_level"); lv && IsNumeric(*lv)) e.Add("level", lv->ToDouble());
+		if (RValue* t = FindMember(self, "target"))
+			if (CInstance* ti = InstOf(*t); ti && ti != Self)
+			{
+				RValue tv(ti);
+				double tx = num(tv, "x"), ty = num(tv, "y");
+				e.Add("target", InstanceStub(ti));
+				e.Add("tx", tx);
+				e.Add("ty", ty);
+				e.Add("dir", g_Yytk->CallBuiltin("point_direction", { RValue(x), RValue(y), RValue(tx), RValue(ty) }).ToDouble());
+			}
+		g_DirectEvents.emplace_back("enemy_attack", std::move(e));
+		return true;
+	}
+	void HookAttack(int Obj)
+	{
+		auto scripts = AttackScripts(Obj);
+		if (scripts.empty()) Fail("attack: its base's attack script is not known (choose another base)");
+		for (auto& sc : scripts) NativeHookInstall(sc, { kOwner, PreAttack, nullptr });
+	}
+
+	// once per frame, outside any script: nothing is being made or placed now (a call stopped by a GML error never got
+	// to its post)
+	void Tick()
+	{
+		++Frame;
+		Makes.clear();
+		SpawnDepth = BossDepth = 0;
+		Forced = nullptr;
+		BossMade = -1;
+	}
+
+	bool Hooked = false;
+	void EnsureHooks()
+	{
+		if (Hooked) return;
+		Hooked = true;
+		NativeHookInstall("instance_create", { kOwner, PreCreate, PostCreate });
+		NativeHookInstall("scr_AI_load_stats", { kOwner, nullptr, PostLoadStats });
+		// a procedural run's placement: its areas' squads and doors, its wanderers, the map streamed in around the camera
+		// (scr_async_instance_load); a preset map's enemies (story, bosses) stay the game's
+		for (const char* name : { "scr_procedural_enemies_create_areas", "scr_procedural_enemies_load_enemies_squads",
+				"scr_procedural_enemies_load_enemies_doors", "scr_procedural_enemies_create_wanderers",
+				"scr_procedural_enemies_trigger_area", "scr_async_instance_load", "scr_procedural_great_forge_step_spawn" })
+			NativeHookInstall(name, { kOwner, [](CInstance*, int, RValue**, RValue&) { ++SpawnDepth; return false; },
+				[](CInstance*, int, RValue**, RValue&) { if (SpawnDepth > 0) --SpawnDepth; } });
+		NativeHookInstall("scr_procedural_battlefield_boss_create", { kOwner, PreBoss, PostBoss });
+		NativeHookInstall("scr_AI_elite_affix_create", { kOwner, nullptr, PostEliteAffix });
+		NativeHookInstall("scr_AI_elite_affix_step", { kOwner, nullptr, PostEliteStep });
+	}
+
+	// {owner, id, base, name, stats {health, damage, ...: x}, scale, color, art {game sprite: its sprite}, loot,
+	//  spawn {chance, replaces: "any" | [game enemies]}} -> {id: key, base}
+	Json Register(const Json& Req)
+	{
+		Def d;
+		d.Owner = Req.GetStr("owner");
+		d.Local = Req.GetStr("id");
+		if (d.Owner.empty() || d.Local.empty()) Fail("register_enemy needs owner and id");
+		d.Key = d.Owner + ":" + d.Local;
+		const Json* base = Req.Find("base");
+		if (!base) Fail("register_enemy needs a base: a game enemy (\"Soldier\", \"obj_soldier\" or its number)");
+		d.Base = Resolve(*base);
+		{                                                        // (the game's bosses: their fights are their own scripts)
+			static const std::set<std::string> bosses = { "obj_alarin", "obj_leader", "obj_palstrang", "obj_adam_nostrus",
+				"obj_ohm_agad", "obj_temple_guardian" };
+			if (bosses.count(ObjName(d.Base))) Fail("base: a boss is not a base (yet)");
+		}
+		if (const Json* n = Req.Find("name")) d.Name = *n;
+		for (const char* k : { "stats", "art", "spawn" })   // (an empty Lua table comes as [])
+			if (const Json* o = Req.Find(k); o && o->type != Json::Obj && !(o->type == Json::Arr && o->a.empty()))
+				Fail(std::string(k) + ": an object ({ ... = ... })");
+		if (const Json* st = Req.Find("stats"))
+			for (auto& [k, v] : st->o)
+			{
+				const std::vector<const char*>* vars = nullptr;
+				for (auto& [name, vs] : StatVars()) if (k == name) vars = &vs;
+				if (!vars)
+				{
+					std::string known;
+					for (auto& [name, vs] : StatVars()) known += (known.empty() ? "" : ", ") + std::string(name);
+					Fail("stats: '" + k + "' is not one of " + known);
+				}
+				if (v.type != Json::Num || v.n < 0 || (k == "health" && v.n == 0)) Fail("stats." + k + ": a multiplier (1 = its base's)" +
+					std::string(k == "health" ? ", above 0" : ""));
+				for (const char* var : *vars) d.Mult.emplace_back(var, v.n);
+			}
+		d.Scale = Req.GetNum("scale", 1);
+		if (d.Scale <= 0 || d.Scale > 10) Fail("scale: above 0, up to 10");
+		if (const Json* c = Req.Find("color"))                  // "#rrggbb" or [r, g, b]
+		{
+			int r = -1, g = -1, b = -1;
+			if (c->type == Json::Str && c->s.size() == 7 && c->s[0] == '#' &&
+				c->s.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos)
+			{
+				long v = std::stol(c->s.substr(1), nullptr, 16);
+				r = v >> 16 & 255; g = v >> 8 & 255; b = v & 255;
+			}
+			else if (c->type == Json::Arr && c->a.size() == 3 && c->a[0].type == Json::Num && c->a[1].type == Json::Num &&
+				c->a[2].type == Json::Num)
+			{
+				r = static_cast<int>(c->a[0].n); g = static_cast<int>(c->a[1].n); b = static_cast<int>(c->a[2].n);
+			}
+			if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) Fail("color: \"#rrggbb\" or [r, g, b] (0-255)");
+			d.Color = b << 16 | g << 8 | r;
+		}
+		auto isSprite = [](const std::string& Name) { return g_Yytk->CallBuiltin("asset_get_type", { RStr(Name) }).ToDouble() == 1; };   // (asset_sprite)
+		if (const Json* art = Req.Find("art"))
+			for (auto& [k, v] : art->o)
+			{
+				int f = isSprite(k) ? AssetOr(k) : -1;
+				int to = v.type == Json::Num ? static_cast<int>(v.n) : v.type == Json::Str && isSprite(v.s) ? AssetOr(v.s) : -1;
+				if (f < 0) Fail("art: no game sprite '" + k + "'");
+				if (to < 0 || !g_Yytk->CallBuiltin("sprite_exists", { RValue(static_cast<double>(to)) }).ToBoolean())
+					Fail("art." + k + ": a sprite (sprite_file's number or a game sprite's name)");
+				d.Art[f] = to;
+			}
+		d.Loot = Req.GetStr("loot");                         // (another word: GML errors at each kill, in scr_create_loot)
+		{
+			static const std::set<std::string> profiles = { "trash", "low", "good", "high", "tactical", "elite", "boss" };
+			if (!d.Loot.empty() && !profiles.count(d.Loot)) Fail("loot: one of trash, low, good, high, tactical, elite, boss");
+		}
+		d.OwnAttack = Req.GetBool("attack", false);
+		if (const Json* sp = Req.Find("spawn"))
+		{
+			d.Chance = sp->GetNum("chance", 0);
+			if (d.Chance < 0 || d.Chance > 1) Fail("spawn.chance: 0 to 1");
+			d.BossChance = sp->GetNum("boss", 0);
+			if (d.BossChance < 0 || d.BossChance > 1) Fail("spawn.boss: 0 to 1");
+			const Json* rep = sp->Find("replaces");
+			if (!rep || (rep->type == Json::Str && Lower(rep->s) == "any")) d.Any = true;
+			else if (rep->type == Json::Arr) for (auto& r : rep->a) d.Replaces.insert(Resolve(r));
+			else d.Replaces.insert(Resolve(*rep));
+		}
+		EnsureHooks();
+		if (d.OwnAttack) HookAttack(d.Base);
+		Json out = Json::Object();
+		out.Add("id", d.Key);
+		out.Add("base", ObjName(d.Base));
+		if (Def* old = ByKey(d.Key)) *old = std::move(d);
+		else Defs.push_back(std::move(d));
+		return out;
+	}
+
+	// a mod's enemies (or one) stop being placed; live ones stay as they are
+	void Unregister(const std::string& Owner, const std::string& Local = "")
+	{
+		std::erase_if(Defs, [&](const Def& d) { return d.Owner == Owner && (Local.empty() || d.Local == Local); });
+		for (auto& m : Makes) m.Def = SIZE_MAX;                  // (indices moved)
+	}
+
+	// its name in the game's language (none: its base's name in the enemy table)
+	std::string NameOf(const Def& D)
+	{
+		std::string n = classes::LangText(&D.Name, classes::CurrentLang());
+		if (!n.empty()) return n;
+		std::string base = ObjName(D.Base);
+		return base.empty() ? D.Local : base;
+	}
+
+	// {enemy: key, x, y, level} -> a new enemy there (the game's instance_create, so its Create runs as for any enemy)
+	Json Spawn(const Json& Req)
+	{
+		const Def* d = ByKey(Req.GetStr("enemy"));
+		if (!d) Fail("no enemy '" + Req.GetStr("enemy") + "' (register_enemy's id)");
+		double x = Req.GetNum("x", 0), y = Req.GetNum("y", 0);
+		Forced = d;
+		ForcedMarked = false;
+		CInstance* by = FirstInstance(AssetIndex("obj_procedural"));   // (as the run's placement calls it)
+		if (!by) by = FirstInstance(AssetIndex("obj_parent_hero"));
+		if (!by) Fail("no hero");
+		RValue r;
+		try { g_Yytk->CallGameScriptEx(r, "gml_Script_instance_create", by, by, { RValue(x), RValue(y), RValue(static_cast<double>(d->Base)) }); }
+		catch (...) { Forced = nullptr; throw; }
+		Forced = nullptr;
+		CInstance* inst = InstOf(r);
+		if (!inst || !ForcedMarked) Fail("the enemy was not made");
+		RValue self(inst);
+		if (const Json* lv = Req.Find("level"); lv && lv->type == Json::Num)
+		{
+			if (RValue* v = FindMember(self, "enemy_level")) *v = RValue(std::clamp(std::floor(lv->n), 1.0, 1000.0));
+			RValue ref = g_Yytk->CallBuiltin("variable_instance_get", { self, RValue("name_id") });
+			RValue ignored;
+			g_Yytk->CallGameScriptEx(ignored, "gml_Script_scr_AI_load_stats", inst, inst, { ref });   // (its stats again: PostLoadStats)
+			g_Yytk->CallGameScriptEx(ignored, "gml_Script_scr_stats_refresh", inst, inst, {});
+			RValue max = g_Yytk->CallBuiltin("variable_instance_get", { self, RValue("final_the_max_health") });
+			if (IsNumeric(max)) g_Yytk->CallBuiltin("variable_instance_set", { self, RValue("the_health"), max });
+		}
+		if (Req.GetBool("aggro", true))                          // (the hero its target at once, as a placed one's when
+			if (CInstance* hero = FirstInstance(AssetIndex("obj_parent_hero")))   // it sees the hero)
+			{
+				g_Yytk->CallBuiltin("variable_instance_set", { self, RValue("target"), RValue(hero) });
+				g_Yytk->CallBuiltin("variable_instance_set", { self, RValue("target_known"), RValue(true) });
+			}
+		Finish(inst, *d);
+		return InstanceStub(inst);
+	}
+
+	// {inst} -> its enemy's key and name, or null (a game enemy)
+	Json Info(const Json& Req)
+	{
+		const Json* in = Req.Find("inst");
+		double id = in && in->type == Json::Num ? in->n : in ? in->GetNum("$inst", -1) : -1;
+		CInstance* inst = id >= 0 ? InstanceById(static_cast<int32_t>(id)) : nullptr;
+		if (!inst) Fail("no instance");
+		std::string mark = MarkOf(inst);
+		if (mark.empty()) return Json();
+		Json out = Json::Object();
+		out.Add("id", mark);
+		if (const Def* d = ByKey(mark)) out.Add("name", NameOf(*d));
+		return out;
+	}
+
+	Json List()
+	{
+		Json out = Json::Array();
+		for (auto& d : Defs)
+		{
+			Json j = Json::Object();
+			j.Add("id", d.Key);
+			j.Add("owner", d.Owner);
+			j.Add("name", NameOf(d));
+			j.Add("base", ObjName(d.Base));
+			j.Add("chance", d.Chance);
+			j.Add("boss", d.BossChance);
+			out.Push(std::move(j));
+		}
+		return out;
+	}
+}
+
+static Json CmdRegisterEnemy(const Json& Req) { return enemies::Register(Req); }
+static Json CmdUnregisterEnemy(const Json& Req)
+{
+	if (Req.GetStr("owner").empty()) Fail("needs owner");
+	enemies::Unregister(Req.GetStr("owner"), Req.GetStr("id"));
+	return Json(true);
+}
+
 
 static Json Dispatch(const Json& Req);
 
@@ -10963,6 +11631,11 @@ static Json Dispatch(const Json& Req)
 	if (cmd == "skill_info") return CmdSkillInfo(Req);
 	if (cmd == "slot_info") return CmdSlotInfo(Req);
 	if (cmd == "stat_list") return CmdStatList();
+	if (cmd == "register_enemy") return CmdRegisterEnemy(Req);
+	if (cmd == "unregister_enemy") return CmdUnregisterEnemy(Req);
+	if (cmd == "spawn_enemy") return enemies::Spawn(Req);
+	if (cmd == "enemy_info") return enemies::Info(Req);
+	if (cmd == "enemies") return enemies::List();
 	if (cmd == "register_legendary") return CmdRegisterLegendary(Req);
 	if (cmd == "unregister_legendary") return CmdUnregisterLegendary(Req);
 	if (cmd == "legendaries") return CmdLegendaries();
@@ -11599,6 +12272,37 @@ function S.legendary(def)
   return r
 end
 function S.legendary_equipped(id) return S.request{ cmd = "legendary_equipped", id = id } end
+-- a custom enemy: data (as register_enemy; art values may be files of the mod's folder: "a.png" or { file, frames,
+-- xorig, yorig }, framed like the game sprite they replace) plus optional handlers on_spawn(e), on_death(e) for its
+-- enemies (e: enemy_spawned / enemy_killed) -> r: r.id, r.spawn(x, y, level) -> the new enemy
+local enemy_handlers = { on_spawn = "enemy_spawned", on_death = "enemy_killed", attack = "enemy_attack" }
+function S.enemy(def)
+  local data, handlers = { cmd = "register_enemy" }, {}
+  for k, v in pairs(def) do
+    if type(v) == "function" then
+      if not enemy_handlers[k] then error("unknown enemy handler '" .. k .. "'", 2) end
+      handlers[k] = v
+      if k == "attack" then data.attack = true end
+    elseif k == "art" and type(v) == "table" then
+      local art = {}
+      for game, own in pairs(v) do
+        if type(own) == "string" and own:find("%.") then art[game] = S.sprite(own, { like = game })
+        elseif type(own) == "table" then art[game] = S.sprite(own.file or own[1], { frames = own.frames, xorig = own.xorig,
+          yorig = own.yorig, like = own.like or game })
+        else art[game] = own end
+      end
+      data.art = art
+    else
+      data[k] = v
+    end
+  end
+  local r = S.request(data)
+  function r.spawn(x, y, level) return S.request{ cmd = "spawn_enemy", enemy = r.id, x = x, y = y, level = level } end
+  for k, fn in pairs(handlers) do
+    S.on(enemy_handlers[k], function(e) if e.id == r.id then fn(e) end end)
+  end
+  return r
+end
 -- the game's buffs: S.buff{ key = "my_buff", stats = { attack_speed_percent = 20 }, duration = 4, max_stacks = 3, name = "..." }
 function S.buff(b) local r = { cmd = "buff_add" }; for k, v in pairs(b) do r[k] = v end; return S.request(r) end
 function S.buff_remove(key, target) return S.request{ cmd = "buff_remove", key = key, target = target } end
@@ -11658,7 +12362,7 @@ local function lines_text(v)                       -- lines, or lines per langua
   for lang, l in pairs(v) do t[lang] = pages_of(l) end
   return t
 end
-)LUA"   /* (one literal holds 16 KB at most: the prelude is two) */   R"LUA(
+)LUA"   /* (one literal holds 16 KB at most: the prelude is three) */   R"LUA(
 local reaper_events = { on_hit = "hit_dealt", on_kill = "enemy_killed", on_boss_kill = "boss_killed",
   on_hero_hit = "hero_hit", on_cast = "skill_cast", on_status = "status_applied", on_damage = "damage_dealt",
   on_cooldown = "cooldown_started" }
@@ -11794,6 +12498,7 @@ local function content_bind(r, def, p)
   S.on("mission_done", function(e) local f = e.class == r.key and p.mdone[e.mission]; if f then r.run(f, e, "mission " .. e.mission) end end, true)
 end
 
+)LUA"   /* (the third) */   R"LUA(
 function S.class(def)
   local data, casts, hits = { cmd = "register_class" }, {}, {}
   for k, v in pairs(def) do
@@ -11919,6 +12624,26 @@ function S.anim(x, y, sprite, o)                     -- an effect animation
 end
 -- pushes target away from by (an instance, e.g. e.hero) with force; a negative force pulls it toward by
 function S.knock(target, force, by) return S.call_on(by or target, "gml_Script_scr_damage_knock", target, by or HERO, force) end
+-- an enemy's attack pieces for an enemy_attack event e (its own attack): its damage, "bad" (they hurt the hero), toward
+-- its target; once it is gone: nothing, nil
+function S.enemy_area(e, o)                          -- a hitbox (o.mask scaled by o.scale) in front of it, or at o.x, o.y
+  if not S.exists(e.enemy) then return nil end
+  o = o or {}
+  local mask, impact = spr(o.mask or "spr_aoe_210"), spr(o.impact or "spr_impact_melee_base")
+  if o.x and o.y then
+    return S.call_on(e.enemy, "gml_Script_scr_damage_create_hitbox", mask, o.scale or 0.5, e.facing or 1, o.dir or e.dir or 0,
+      "", snd(o.sound, "small_sword_impact"), impact, "bad", e.enemy, false, o.element or e.element or "none", o.x, o.y)
+  end
+  return S.call_on(e.enemy, "gml_Script_scr_damage_create_hitbox", mask, o.scale or 0.5, e.facing or 1, o.dir or e.dir or 0,
+    "", snd(o.sound, "small_sword_impact"), impact, "bad", e.enemy, false, o.element or e.element or "none")
+end
+function S.enemy_projectile(e, o)                    -- o.n projectiles toward its target (or o.dir degrees)
+  if not S.exists(e.enemy) then return nil end
+  o = o or {}
+  return S.call_on(e.enemy, "gml_Script_scr_new_attack_state_projectile_create", o.n or 1, S.asset("obj_projectile"),
+    snd(o.sound, "bow_fire"), o.spread or 30, "", e.enemy, o.element or e.element or "none", false, false, -1, -1, o.dir or -1,
+    "", 0, o.speed or 6, spr(o.sprite or "spr_archer_arrow"))
+end
 print = S.log
 )LUA";
 
@@ -11937,7 +12662,7 @@ print = S.log
 			catch (const std::exception&) {}
 		}
 		M.Menus.clear();
-		try { CmdUnhook(owner); CmdUnsubscribe(owner); legend::Unregister(M.Owner()); }
+		try { CmdUnhook(owner); CmdUnsubscribe(owner); legend::Unregister(M.Owner()); enemies::Unregister(M.Owner()); }
 		catch (const std::exception&) {}
 		// its game heroes' content goes with it (its code - legacies' uses, reapers' handlers - is gone); a class stays
 		// (its saves are its own). At the game's exit nothing changes
@@ -12081,6 +12806,9 @@ print = S.log
 			}
 			if (!f.is_regular_file(fe)) continue;
 			std::string name = f.path().filename().string(), low = Lower(name);
+			std::string inner = fs::path(low.substr(0, low.find(".lua"))).extension().string();
+			if (inner == ".png" || inner == ".gif" || inner == ".jpg" || inner == ".jpeg" || inner == ".ogg" || inner == ".wav")
+				continue;                                              // a data file (FromDataFile), not a script
 			if (low.ends_with(".lua")) put(name.substr(0, name.size() - 4), { f.path(), true, false, name, "" });
 			else if (low.ends_with(".lua.disabled"))
 				put(name.substr(0, name.size() - 13), { f.path(), false, false, name.substr(0, name.size() - 9), "" });
@@ -12451,6 +13179,7 @@ static void CodeEventCallback(FWCodeEvent& Context)
 		if (!classes::Defs.empty()) { classes::ReaperCases(); classes::AreaFrame(); }
 		try { classes::Tick(); }
 		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] classes: %s", e.what()); }
+		if (enemies::Hooked) enemies::Tick();
 		try { PerfScope p(&g_PerfPartUs[2]); lua::Tick(); }
 		catch (const std::exception& e) { DbgPrintEx(LOG_SEVERITY_WARNING, "[SlormAPI] lua: %s", e.what()); }
 	}

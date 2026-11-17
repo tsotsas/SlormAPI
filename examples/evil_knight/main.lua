@@ -1,4 +1,4 @@
--- Evil Knight: an example class for SlormAPI's custom classes (SlormAPI 2.0.0+, docs/CLASSES.md). In the hub it stands
+-- Evil Knight: an example class for SlormAPI's custom classes (SlormAPI 2.1.0+, docs/CLASSES.md). In the hub it stands
 -- right of the Knight's spot; talk to it and say Yes to play it. Its own kit (kit = "own"): 3 supports and 8 skills with
 -- their own code, its own upgrade tree and specializations, and its own mechanic, Malice; its own Ancestral Legacy tree,
 -- achievements, reapers, legendaries, skins, story missions and story area. It looks like the Knight in inverted

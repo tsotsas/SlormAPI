@@ -1,11 +1,11 @@
 # Evil Knight — an example class
 
-A complete custom class for SlormAPI 2.0.0+, as a Lua pack. It is the reference for [docs/CLASSES.md](../../docs/CLASSES.md):
+A complete custom class for SlormAPI 2.1.0+, as a Lua pack. It is the reference for [docs/CLASSES.md](../../docs/CLASSES.md):
 nearly every option a class has is used here, in one file (`main.lua`).
 
 **Play it:** copy this folder into `<The Slormancer>\mods\lua\` (as `mods\lua\evil_knight\`), start the game, and talk
-to the Evil Knight in the hub (right of the Knight's spot): Yes plays it. Copy it by hand: Vortex installs a pack's
-`.lua` files only, so its art would be left out.
+to the Evil Knight in the hub (right of the Knight's spot): Yes plays it. For Vortex, `..\lua_pack\pack.cmd` with this
+folder's full path makes a zip with its art as `.lua` data files.
 
 | what | where in `main.lua` |
 |---|---|

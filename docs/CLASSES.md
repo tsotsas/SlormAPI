@@ -1,4 +1,4 @@
-# SlormAPI 2.0.0 — custom classes and hero content
+# SlormAPI 2.1.0 — custom classes and hero content
 
 A mod can add a **class**: a playable hero of its own next to the Knight, the Huntress and the Mage. It can also give
 the **game's three heroes** content of their own (art, skins, reapers, sounds, achievements, missions, legacies).
@@ -77,8 +77,10 @@ Put it in `mods/lua/` and it loads at once (and again each time you save it). Th
 `"requires": { "slorm.slormapi": "2.0.0" }`.
 
 **Art and sound files and Vortex.** A class's files sit in its pack's folder, next to its script. Vortex installs a
-pack's `.lua` files only, so a pack with art or sounds is installed by hand: its zip unzipped into the game folder
-(`mods/lua/<id>/`). A class without files of its own (like the Paladin) installs with Vortex as any Lua pack.
+pack's `.lua` files only, so `examples/lua_pack/pack.cmd` puts each image and sound into the zip as a data file
+`<file>.lua` (`art/idle.png` as `art/idle.png.lua`), and SlormAPI 2.1.0+ reads that as the file when the file itself
+is not there. The class's code stays the same, and Vortex installs the zip as any Lua pack; such a pack requires
+`"slorm.slormapi": "2.1.0"`.
 
 A class registers again when its mod loads again: same owner and id, same class, its data kept. Registering it again
 with other options rebuilds what changed, also while it is played.
@@ -415,6 +417,8 @@ Events: `class_cast`, `class_hit`, `legacy_used`, `class_achievement`, `mission_
   by side (`frames`; else as many of `like`'s width as fit; else 1), its origin `xorig` / `yorig` (else `like`'s, else
   its middle). Made once per file version.
 - `sound_file {file}` / `slorm.sound(file)`: `.ogg` (streamed) or `.wav` (PCM, 8 or 16 bit, mono or stereo).
+- Each file can also come as its data file `<file>.lua` (2.1.0+; `pack.cmd` makes them, for Vortex): read when the
+  file itself is not there, decoded once to `mods/aurie/SlormAPI/files/`.
 - `sound_play {sound, gain, pitch, loop}` / `slorm.play(sound, o)`: plays it at the game's sound effect volume × gain.
 - Paths are relative to the Lua mod's folder (for other callers, to `mods/`) and must stay inside `mods/`.
 

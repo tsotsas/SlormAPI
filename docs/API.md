@@ -1,8 +1,8 @@
-# SlormAPI 2.0.0 — API reference
+# SlormAPI 2.1.0 — API reference
 
 Everything a mod can do through SlormAPI: every command with its fields and results, the events, draw programs and
 widgets, Lua mods, settings, data files, and the game facts you need to use them. Custom classes and the game heroes'
-content have their own guide: [CLASSES.md](CLASSES.md).
+content have their own guide: [CLASSES.md](CLASSES.md); custom enemies too: [ENEMIES.md](ENEMIES.md).
 
 - [How it works](#how-it-works)
 - [Making a mod](#making-a-mod) — [C++](#a-c-mod) · [Lua](#a-lua-mod) · [external tool (dev server)](#an-external-tool-the-dev-server)
@@ -18,6 +18,7 @@ content have their own guide: [CLASSES.md](CLASSES.md).
   - [Game knowledge](#game-knowledge): `item_info` `stat_info` `stat_list` `hero_stats` `slot_info` `legendary_info` `skill_info`
   - [Legendaries](#legendaries): `register_legendary` `unregister_legendary` `legendaries` `legendary_equipped` `legendary_drop` `legendaries_waiting`
   - [Classes and hero content](#classes-and-hero-content): `register_class` `register_hero` `unregister_hero` `class_rank` `legacy_rank` `content_row` `class_meter` `class_achievement` `class_reaper` `class_mission` `switch_hero`
+  - [Custom enemies](#custom-enemies): `register_enemy` `unregister_enemy` `spawn_enemy` `enemy_info` `enemies`
   - [Dialogues, sprites and sounds](#dialogues-sprites-and-sounds): `say` `sprite_file` `sound_file` `sound_play`
   - [Buffs](#buffs): `buff_add` `buff_remove` `buff_stacks`
   - [Other](#other): `batch` `perf` `profile` `catch_errors` `runner` `routines` `routine_index` `static_value`
@@ -174,7 +175,8 @@ manifest requires `slorm.slormapi`:
 Zip it in the game-folder layout (`mods/lua/<id>/lua-pack.json`, `mods/lua/<id>/<entry>`): The Slormancer's Vortex
 extension installs it as a Lua pack (into `mods/Lua/<id>/`), and unzipping it into the game folder works too.
 `examples/lua_pack/` is a pack to start from; its `pack.cmd` checks `lua-pack.json` by the extension's rules and
-makes that zip.
+makes that zip. The extension installs a pack's `.lua` files only, so `pack.cmd` puts the pack's images and sounds in
+as data files (see [`sprite_file`](#sprite_file)).
 
 See [Lua reference](#lua-reference) for every function and the sandbox rules. `examples/lua/kill_counter.lua` is a
 small complete mod; [BuildFilter](https://github.com/tsotsas/BuildFilter)'s `lua/BuildFilter.lua` is a big one
@@ -612,6 +614,40 @@ whether that reaper's effect is on (worn, or one the worn one evolved from).
 `hero` *n* → `true`: switches to that hero (0-2 or a class) with the game's own switch (it saves, then the hub loads
 with that hero). Not for Lua.
 
+### Custom enemies
+
+An enemy of a mod's own on one of the game's enemies (its base): its own name, stats, size, colour, art, loot and, in
+Lua, its own attack; runs place it among their enemies. Options, bases, the attack and the Lua side:
+[ENEMIES.md](ENEMIES.md). Its key is `"<owner>:<id>"`.
+
+#### `register_enemy`
+| field | |
+|---|---|
+| `owner`, `id` *s* | required |
+| `base` | required: a game enemy - its name in the enemy table (`"Soldier"`), its object (`"obj_soldier"`) or its number |
+| `name` | a text or one per language |
+| `stats` *o* | multipliers of its base's stats: `health`, `damage`, `speed`, `res_phy`, `res_mag`, `cooldown`, `attack_range`, `precision`, `dodge`, `crit_chance`, `knockback_weight`, `knockback_force` |
+| `scale` *n* [1], `color` (`"#rrggbb"` / `[r, g, b]`) | its size, its tint |
+| `art` *o* | `{game sprite name: sprite number}` (`sprite_file`'s) |
+| `loot` *s* | its loot profile: `trash`, `low`, `good`, `high`, `tactical`, `elite`, `boss` |
+| `spawn` *o* | `{chance: 0-1, replaces: "any" or [game enemies]}`: its share of the enemies a Battlefield run places; `boss: 0-1`: its chance to be a boss floor's boss ([ENEMIES.md](ENEMIES.md#as-the-battlefields-boss)) |
+| `attack` *b* | its base's attack does not run for it; `enemy_attack` comes instead |
+
+→ `{id, base}` (its key, its base's object). The same id again replaces it.
+
+#### `unregister_enemy`
+`owner`, `id` (none: all of the owner's) → `true`. Live ones stay as they are (they fight as their base).
+
+#### `spawn_enemy`
+`enemy` *s* (its key), `x`, `y` *n*, `level` *n* (1-1000; the run's), `aggro` *b* [true] (the hero its target at once) →
+the new enemy `{$inst}`, made with the game's `instance_create`.
+
+#### `enemy_info`
+`inst` → `{id, name}` of a custom enemy, `null` for a game one.
+
+#### `enemies`
+→ `[{id, owner, name, base, chance, boss}]`.
+
 ### Dialogues, sprites and sounds
 
 #### `say`
@@ -623,11 +659,13 @@ played), `key` *s* (your line's name), `choice` *s* (its last page asks Yes / No
 `file` *s*, `frames` *n*, `xorig`, `yorig` *n*, `like` (a sprite) → a sprite from a PNG / GIF / JPG strip (frames
 side by side: `frames`, else as many of `like`'s width as fit, else 1; origin: given, else `like`'s, else the
 middle), made once per file version. The path is relative to `mods/` (a Lua mod: its folder) and must stay inside
-`mods/`.
+`mods/`. When the file is not there, its data file `<file>.lua` is read instead (2.1.0+): `return "<the file in
+base64>"`, made by `examples/lua_pack/pack.cmd` because Vortex installs a pack's `.lua` files only; it is decoded once
+to `mods/aurie/SlormAPI/files/`.
 
 #### `sound_file`
-`file` *s* → a sound from an `.ogg` (streamed) or `.wav` (PCM, 8 / 16 bit, mono / stereo) file; paths as
-`sprite_file`.
+`file` *s* → a sound from an `.ogg` (streamed) or `.wav` (PCM, 8 / 16 bit, mono / stereo) file; paths and data
+files as `sprite_file`.
 
 #### `sound_play`
 `sound` *n* (`sound_file`'s or a game sound's number), `gain` *n* [1], `pitch` *n*, `loop` *b* → the playing
@@ -693,7 +731,7 @@ someone listens; watchers compare state each frame (or a few times a second).
 
 | event | data | source |
 |---|---|---|
-| `enemy_killed` | `enemy` {$inst, $object}, `x`, `y`, `level`, `profile` (`trash` / `good` / `elite` / `boss`) | `scr_hero_stats_on_kill` |
+| `enemy_killed` | `enemy` {$inst, $object}, `x`, `y`, `level`, `profile` (`trash` / `good` / `elite` / `boss`), `id` (a [custom enemy](ENEMIES.md)'s key) | `scr_hero_stats_on_kill` |
 | `boss_killed` | as `enemy_killed` | a kill with profile `boss` |
 | `hero_hit` | `damage`, `attacker` {$inst, $object}, `life`, `max_life`, `shield`, `max_shield` (Light Shield after the hit) | `scr_hero_proc_when_hit` |
 | `hit_dealt` | `target` {$inst, $object}, `skill` (id, or a name such as `"overdrive"`), `strike` (`normal` / `critical` / `ancestral`) | every hero hit (`scr_hero_proc_when_crit_brutal`) |
@@ -720,6 +758,8 @@ someone listens; watchers compare state each frame (or a few times a second).
 | `class_achievement` | `class`, `id`, `step`, `steps` | one of its own achievements reached a new step |
 | `mission_started` / `mission_done` | `class`, `mission` (id), `owner`, `ref` (its number in the story table); `runs` (done) | its story mission started / a run of it done |
 | `dialogue_choice` | `owner`, `id` | Yes on a `say` question |
+| `enemy_spawned` | `enemy` {$inst, $object}, `id`, `x`, `y`, `level`, `boss` (a boss floor's boss) | a [custom enemy](ENEMIES.md) placed (by a run or `spawn_enemy`) |
+| `enemy_attack` | `enemy`, `id`, `x`, `y`, `facing`, `target`, `tx`, `ty`, `dir`, `element`, `level` | a custom enemy with its own attack strikes ([ENEMIES.md](ENEMIES.md#its-own-attack)) |
 
 What already exists when you start listening is not reported (e.g. loot already on the ground).
 
@@ -858,6 +898,8 @@ Lua 5.5, one state per file, run on the game thread. `slorm.request` plus helper
 | `slorm.on_stats(fn)` | `fn(e)` right after each refresh of the hero's stats, inside the game's: change its final stats there (`e.hero`, `e.hero_number`) |
 | `slorm.class{...}` → C / `slorm.hero{...}` → H | a custom class / a game hero's content ([CLASSES.md](CLASSES.md)) |
 | `slorm.melee(e, o)` / `slorm.projectile(e, o)` / `slorm.area(e, o)` / `slorm.anim(x, y, sprite, o)` / `slorm.knock(target, force, by)` / `slorm.debuff(target, key, seconds, value)` | the game's attack pieces for a class's cast ([CLASSES.md](CLASSES.md#skill-code)) |
+| `slorm.enemy{...}` → r | a custom enemy ([ENEMIES.md](ENEMIES.md)) + handlers `attack`, `on_spawn`, `on_death`; `r.id`, `r.spawn(x, y, level?)` |
+| `slorm.enemy_projectile(e, o)` / `slorm.enemy_area(e, o)` | an enemy's attack pieces for its own attack (`enemy_attack` e) |
 | `slorm.rank(entry)` | the played class's rank of a row (`C.rank(id)` by id) |
 | `slorm.say(lines, on_yes?)` | a dialogue in the game's box: a text, or pages (`"text"` / `{speaker, "text"}`); `on_yes`: its last page asks Yes / No |
 | `slorm.sprite(file, o?)` / `slorm.sound(file)` / `slorm.play(sound, o?)` | a sprite / sound from a file in your mod's folder; play a sound (`o.gain`, `o.pitch`, `o.loop`) |

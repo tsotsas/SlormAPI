@@ -1,4 +1,4 @@
-# SlormAPI 2.0.0 — a modding API for The Slormancer
+# SlormAPI 2.1.0 — a modding API for The Slormancer
 
 ![SlormAPI](docs/banner.png)
 
@@ -7,7 +7,7 @@ variables, instances, scripts and built-in functions, script hooks, game events,
 sprites and fonts — including buttons in the game's own menus that hover, click and slide like native ones. Mods use
 it from C++ or as **Lua mods**: one text file in `mods\lua`, loaded while the game runs. Mods can add **custom
 classes** (playable heroes of their own, with their own skills, upgrade tree, legacies, achievements, reapers and
-story) and give the Knight, the Huntress and the Mage new content.
+story), give the Knight, the Huntress and the Mage new content, and add **custom enemies** to the game's runs.
 
 On its own it adds two things to the game's menus:
 - a **MODS** button next to DISCORD in the main menu and the pause menu. It lists the installed mods with their
@@ -25,7 +25,7 @@ Lua mod with an error, a mod whose game functions were not found after a game up
 time (the button then reads MODS (!)).
 
 Example mods: `examples/lua/kill_counter.lua` here, the classes `examples/lua/paladin.lua` (small) and
-`examples/evil_knight` (everything a class can have), and **[BuildFilter](https://github.com/tsotsas/BuildFilter)**, a
+`examples/evil_knight` (everything a class can have), two enemies in `examples/lua/enemies.lua`, and **[BuildFilter](https://github.com/tsotsas/BuildFilter)**, a
 loot filter made twice - in C++ and in Lua - with the same features.
 
 ## Requirements
@@ -34,18 +34,18 @@ loot filter made twice - in C++ and in Lua - with the same features.
   loads Aurie mods another way works as it is.
 
 ## Install
-Easiest: **`SlormAPI-Installer-2.0.0.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
+Easiest: **`SlormAPI-Installer-2.1.0.zip`** from the [Releases](https://github.com/tsotsas/SlormAPI/releases). Unzip
 it, close the game, double-click `Install.bat` and choose 1. It installs the Aurie loader (the official Aurie Core
 2.0.2 + YYToolkit 5.0.0c, checked against their release checksums) and SlormAPI, and can repair the loader after a
 game update or remove everything. When the game already loads Aurie through another mod loader (a `version.dll`
 loader), it keeps that loader and adds only the mod.
 
-Manually (`SlormAPI-2.0.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
+Manually (`SlormAPI-2.1.0.zip`, the game-folder layout: `mods/Aurie/SlormAPI.dll`):
 1. Have Aurie + YYToolkit for The Slormancer (https://github.com/AurieFramework/Aurie,
    https://github.com/AurieFramework/YYToolkit), or a game where Aurie mods already load.
 2. Unzip it into `<The Slormancer folder>`.
 
-With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-2.0.0.zip` in
+With **Vortex**: install The Slormancer's Vortex extension and its loader first, then add `SlormAPI-2.1.0.zip` in
 Vortex like any other mod (it goes to `mods/Aurie`). Don't use the installer then. If you used it before, run it once
 more and choose 4: the Vortex loader setup needs the original game exe back. Mods that Vortex deployed show "Switched
 on / off in Vortex" on the Mods page.
@@ -56,7 +56,7 @@ normal three-hero save, and a custom class's progress is kept apart, in `mods/au
 ## For mod authors
 **Full reference: [docs/API.md](docs/API.md)** — every command, event, draw program, widget and Lua function in
 detail, the item format, a game cheat sheet, and how to start a C++ or Lua mod. Custom classes and hero content:
-**[docs/CLASSES.md](docs/CLASSES.md)**. The short version:
+**[docs/CLASSES.md](docs/CLASSES.md)**; custom enemies: **[docs/ENEMIES.md](docs/ENEMIES.md)**. The short version:
 
 Copy `source/SlormAPI_Interface.hpp` into your Aurie module and get the interface (modules can load in any order, so ask
 for it from a game callback, not in `ModuleInitialize`):
@@ -130,7 +130,7 @@ frame, right after they happened, on the game thread.
 
 | event | data |
 |---|---|
-| `enemy_killed` | `enemy` (`$inst`, `$object`), `x`, `y`, `level`, `profile` (trash / good / elite / boss) |
+| `enemy_killed` | `enemy` (`$inst`, `$object`), `x`, `y`, `level`, `profile` (trash / good / elite / boss), `id` (a custom enemy's) |
 | `loot_dropped` | `loot` (the `obj_loot` instance), `item` (the item array, as in the save files), `info` (as `item_info`) |
 | `item_picked_up` | `items`, `picked` |
 | `gold_changed` | `gold`, `delta` |
@@ -155,6 +155,7 @@ frame, right after they happened, on the game thread.
 | `class_achievement` | `class`, `id`, `step`, `steps` (an own achievement's new step) |
 | `mission_started` / `mission_done` | `class`, `mission`, `ref`, + `runs` (an own story mission) |
 | `dialogue_choice` | `owner`, `id` (Yes on a `say` question) |
+| `enemy_spawned` / `enemy_attack` | a custom enemy placed / striking with its own attack ([ENEMIES.md](docs/ENEMIES.md)) |
 
 C++:
 
@@ -185,8 +186,8 @@ Its `name`, `author` and `description` show on the Mods page (no `slorm.mod{}` n
 files are named after the `id`.
 
 **Starting a new one:** copy `examples/lua_pack/` - a pack ready to rename, with `pack.cmd`, which checks
-`lua-pack.json` and makes the zip for Nexus / Vortex. Vortex installs a pack's `.lua` files only: a pack with art or
-sound files (a custom class's) is unzipped into the game folder by hand.
+`lua-pack.json` and makes the zip for Nexus / Vortex. Vortex installs a pack's `.lua` files only, so `pack.cmd` puts
+a pack's art and sound files (a custom class's) in as `.lua` data files, which SlormAPI 2.1.0+ reads as the files.
 
 ```lua
 slorm.mod{ name = "Kill Counter", version = "1.0", author = "me", description = "Counts your kills" }
@@ -207,6 +208,7 @@ end)
 | `slorm.exists(inst)` | the instance (`{$inst}` or its id) still there |
 | `slorm.class{...}` / `slorm.hero{...}` | a custom class / content for the Knight, the Huntress or the Mage ([CLASSES.md](docs/CLASSES.md)) |
 | `slorm.melee` / `projectile` / `area` / `anim` / `knock` / `debuff` | the game's attack pieces for a class's own skills |
+| `slorm.enemy{...}` / `slorm.enemy_projectile` / `enemy_area` | a custom enemy / its own attack's pieces ([ENEMIES.md](docs/ENEMIES.md)) |
 | `slorm.say(lines, on_yes?)` / `slorm.sprite(file)` / `slorm.sound(file)` / `slorm.play(sound)` | a dialogue in the game's box / art and sounds from your mod's folder |
 | `slorm.settings{...}` / `slorm.setting(key)` | your settings in Options > Mods (as `register_settings`) |
 | `slorm.ui(menu, calls)` / `slorm.ui_remove(menu)` | your widgets in a menu; `slorm.text`, `slorm.button`, `slorm.radio`, `slorm.selector` make them |
@@ -307,6 +309,19 @@ The game's three heroes can get the same content (art, skins, reapers, sounds, a
 `slorm.hero{hero = "knight", ...}`; several mods' content is merged. The game's own save stays a normal three-hero save.
 Everything about it: **[docs/CLASSES.md](docs/CLASSES.md)**; examples: `examples/lua/paladin.lua`,
 `examples/evil_knight`.
+
+## Custom enemies
+A mod can add enemies on the game's enemies' bodies: its own name, stats (multipliers of its base's), size, colour,
+art and loot, and in Lua its own attack (projectiles and hitboxes with the enemy's damage). Battlefield runs place them
+among their enemies (`spawn = { chance, replaces }`) and as a boss floor's boss (`spawn = { boss }`), or a mod places
+one itself:
+
+```lua
+slorm.enemy{ id = "bone_brute", base = "Soldier", name = "Bone Brute", stats = { health = 2.5, damage = 1.5 },
+  scale = 1.35, color = "#ff8060", loot = "tactical", spawn = { chance = 1 / 12, replaces = "any" } }
+```
+
+Everything about it: **[docs/ENEMIES.md](docs/ENEMIES.md)**; example: `examples/lua/enemies.lua`.
 
 ## Mod settings
 Describe your settings once (e.g. when your mod starts); SlormAPI shows them in Options > Mods, saves the values in
